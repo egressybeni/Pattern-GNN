@@ -1,34 +1,80 @@
 """
-This script provides a number of utility functions for parsing command line arguments and logging performance metrics
+This script provides a number of utility functions for parsing 
+command line arguments and logging performance metrics.
 """
-import os, sys, json, argparse, copy, random, datetime, logging, torch
+import os
+import sys
+import json
+import argparse
+import copy
+import random
+import datetime
+import logging
+import torch
 import numpy as np
 import pandas as pd
 from pathlib import Path
 from munch import munchify
 
-pretrain_feats_sim = {"all_simulated": ['deg_in', 'deg_out', 'fan_in', 'fan_out', 'ratio_in', 'ratio_out', 'deg_in_timespan', 'timevar_in', 'timevar_out', 'max_deg_in', 'C2_check', 'C3_check', 'C4_check', 'C5_check', 'C6_check',  'C2_count', 'C3_count', 'C4_count', 'K3_check', 'K4_check', 'K5_check', 'K6_check', 'K7_check', 'K3_count', 'K4_count', 'K5_count', 'K6_count', 'K7_count', 'SG1_check', 'SG2_check', 'SG3_check', 'SG4_check', 'BP1_check', 'BP2_check', 'BP3_check', 'BP4_check', 'SG_max'],"binary_2hop": ['deg_in_check', 'deg_out_check', 'fan_in_check', 'fan_out_check', 'ratio_in_check', 'ratio_out_check', 'deg_in_timespan_check', 'timevar_in_check', 'timevar_out_check', 'max_deg_in_check', 'C2_check', 'C3_check', 'C4_check', 'K3_check', 'SG2_check', 'BP2_check'],"binary_all": ['deg_in_check', 'deg_out_check', 'fan_in_check', 'fan_out_check', 'ratio_in_check', 'ratio_out_check', 'deg_in_timespan_check', 'timevar_in_check', 'timevar_out_check', 'max_deg_in_check', 'C2_check', 'C3_check', 'C4_check', 'C5_check', 'C6_check', 'K3_check', 'K4_check','SG1_check', 'SG2_check', 'SG_max_check','BP1_check', 'BP2_check'],"binary_full": ['deg_in_check', 'deg_out_check', 'fan_in_check', 'fan_out_check', 'ratio_in_check', 'ratio_out_check', 'deg_in_timespan_check', 'timevar_in_check', 'timevar_out_check', 'max_deg_in_check', 'C2_check', 'C3_check', 'C4_check', 'C5_check', 'C6_check', 'K3_check', 'K4_check', 'K5_check', 'SG1_check', 'SG2_check', 'SG3_check', 'SG4_check', 'SG_max_check', 'BP1_check', 'BP2_check', 'BP3_check', 'BP4_check', 'gather_cc_check'],"continuous_2hop": ['deg_in', 'deg_out', 'fan_in', 'fan_out', 'ratio_in', 'ratio_out', 'deg_in_timespan', 'timevar_in', 'timevar_out', 'max_deg_in', 'C2_count', 'C3_count', 'C4_count', 'K3_count', 'SG2_count', 'BP2_count'],"continuous_all": ['deg_in', 'deg_out', 'fan_in', 'fan_out', 'ratio_in', 'ratio_out', 'deg_in_timespan', 'timevar_in', 'timevar_out', 'max_deg_in','C2_count', 'C3_count', 'C4_count','K3_count', 'SG_max'],"edge_all": ['e_time_mod7'],"edge_binary": ['e_time_mod7_check'],"test_all": ['max_deg_in'],"test_binary": ['deg_in_check', 'deg_out_check', 'fan_in_check', 'fan_out_check']}
+pretrain_feats_sim = {
+	"all_simulated": [
+		'deg_in', 'deg_out', 'fan_in', 'fan_out', 'ratio_in', 'ratio_out', 'deg_in_timespan', 'timevar_in', 'timevar_out', 'max_deg_in', 
+		'C2_check', 'C3_check', 'C4_check', 'C5_check', 'C6_check',  'C2_count', 'C3_count', 'C4_count', 
+		'K3_check', 'K4_check', 'K5_check', 'K6_check', 'K7_check', 'K3_count', 'K4_count', 'K5_count', 'K6_count', 'K7_count', 
+		'SG1_check', 'SG2_check', 'SG3_check', 'SG4_check', 'BP1_check', 'BP2_check', 'BP3_check', 'BP4_check', 'SG_max'
+		],
+	"binary_2hop": [
+		'deg_in_check', 'deg_out_check', 'fan_in_check', 'fan_out_check', 'ratio_in_check', 'ratio_out_check', 'deg_in_timespan_check', 
+		'timevar_in_check', 'timevar_out_check', 'max_deg_in_check', 'C2_check', 'C3_check', 'C4_check', 'K3_check', 'SG2_check', 'BP2_check'
+		],
+	"binary_all": [
+		'deg_in_check', 'deg_out_check', 'fan_in_check', 'fan_out_check', 'ratio_in_check', 'ratio_out_check', 'deg_in_timespan_check', 
+		'timevar_in_check', 'timevar_out_check', 'max_deg_in_check', 'C2_check', 'C3_check', 'C4_check', 'C5_check', 'C6_check', 
+		'K3_check', 'K4_check','SG1_check', 'SG2_check', 'SG_max_check','BP1_check', 'BP2_check'
+		],
+	"binary_complex": [
+		'C4_check', 'C5_check', 'C6_check', 'SG2_check', 'BP2_check'
+		],
+	"binary_full": [
+		'deg_in_check', 'deg_out_check', 'fan_in_check', 'fan_out_check', 'ratio_in_check', 'ratio_out_check', 'deg_in_timespan_check', 
+		'timevar_in_check', 'timevar_out_check', 'max_deg_in_check', 'C2_check', 'C3_check', 'C4_check', 'C5_check', 'C6_check', 
+		'K3_check', 'K4_check', 'K5_check', 'SG1_check', 'SG2_check', 'SG3_check', 'SG4_check', 'SG_max_check', 
+		'BP1_check', 'BP2_check', 'BP3_check', 'BP4_check', 'gather_cc_check'],
+	"continuous_2hop": [
+		'deg_in', 'deg_out', 'fan_in', 'fan_out', 'ratio_in', 'ratio_out', 'deg_in_timespan', 'timevar_in', 'timevar_out', 'max_deg_in', 
+		'C2_count', 'C3_count', 'C4_count', 'K3_count', 'SG2_count', 'BP2_count'
+		],
+	"continuous_all": [
+		'deg_in', 'deg_out', 'fan_in', 'fan_out', 'ratio_in', 'ratio_out', 'deg_in_timespan', 'timevar_in', 'timevar_out', 'max_deg_in',
+		'C2_count', 'C3_count', 'C4_count','K3_count', 'SG_max'
+		],
+	"edge_all": ['e_time_mod7'],
+	"edge_binary": ['e_time_mod7_check'],
+	"test_all": ['max_deg_in'],
+	"test_binary": ['deg_in_check', 'deg_out_check', 'fan_in_check', 'fan_out_check']
+	}
 pretrain_feats_mf = {"all_mf": None,"aml-e_medium": ['FanIn [2:3)', 'FanIn [3:4)', 'FanIn [4:5)','FanOut [2:3)', 'FanOut [3:4)', 'FanOut [4:5)','DegIn [2:3)', 'DegIn [30:inf)','DegOut [2:3)', 'DegOut [30:inf)','ScatGat [2:3)','LCCycle [2:3)'],"eth": ['FanIn [2:3)', 'FanIn [3:4)','FanOut [2:3)', 'FanOut [3:4)', 'DegIn [2:3)', 'DegIn [3:4)', 'DegIn [30:inf)','DegOut [2:3)', 'DegOut [3:4)', 'DegOut [30:inf)','ScatGat [2:3)', 'ScatGat [3:4)','LCCycle [2:3)', 'LCCycle [3:4)', 'LCCycle [4:5)', 'LCCycle [5:6)', 'LCCycle [6:7)', 'LCCycle [7:8)']}
 pretrain_choices = list(pretrain_feats_sim.keys()) + list(pretrain_feats_mf.keys())
 model_choices = ["gcn", "mlp", "type1", "type2", "type2_hetero_sage","type2_hetero_gat", "type2_gnn_mlp", "pc_gnn", "type2_homo_gat", "gin", "gat", "gine", "pna", "gcnn", "old_gin"]
 gnn_model_choices = ["type2_hetero_sage", "type2_hetero_gat", "type2_gnn_mlp", "pc_gnn", "type2_homo_gat", "gin", "gat", "rgcn","type2_hetero_sage_sampled", "type2_hetero_gat_sampled", "type2_gnn_mlp_sampled", "pc_gnn_sampled", "type2_homo_gat_sampled", "gin_sampled", "gat_sampled", "gine", "custom"]
 
+
 def open_csv(file_name, header):
 	"""
-    Open CSV to prepare for writing
-    :param file_name: Name of CSV
+	Open CSV to prepare for writing
+	:param file_name: Name of CSV
     :param header: Header to be written
     :return: CSV file object
     """
 	if Path(file_name).is_file():
-		csv = open(file_name, 'a')
+		csv = open(file_name, 'a', encoding='utf-8')
 	else:
-		csv = open(file_name, 'w')
+		csv = open(file_name, 'w', encoding='utf-8')
 		csv.write(header)
 		csv.flush()
 	return csv
 	
-	
+
 def write_csv(csv, arr):
 	"""
     Write data to CSV file object
@@ -86,7 +132,7 @@ def load_options():
 	parser.add_argument("--bidirectional_simulator", action='store_true', help="Use bidirectional graph simulator to generate data")
 	parser.add_argument("--sim_num_nodes", default=8192, type=int, help="Size of simulated graphs")
 	parser.add_argument("--sim_num_graphs", default=1, type=int, help="Number of disconnected graphs per simulated dataset")
-	parser.add_argument("--sim_generator", default='chordal', type=str, choices=["chordal", "barabasi", "random", "erdos"])
+	parser.add_argument("--sim_generator", default='chordal', type=str, choices=["chordal", "barabasi", "random", "erdos", "watts"])
 	parser.add_argument("--sim_avg_degree", default=None, type=int, help="Average degree in simulated graphs")
 	parser.add_argument("--sim_delta", default=None, type=int, help="Mean delta for sampling destination nodes. Small delta means very localized connectivity.")
 	parser.add_argument("--sim_num_patterns", default=100, type=int, help="Number of manual patterns to add")
@@ -115,6 +161,8 @@ def load_options():
 	# parser.add_argument("--rerun", action='store_true', help="Decide whether or not to rerun in case of cuda OOM.")
 	parser.add_argument("--save_splits", action='store_true', help="Save val_folds and te_inds for eth.")
 	parser.add_argument("--num_seeds", default=1, type=int, help="Number of different seeds to run")
+
+	parser.add_argument("--inference", action='store_true', help="Inference only mode.")
 	
 	return parser.parse_args()
 	
@@ -148,7 +196,7 @@ duplicate_config_args = ["reverse_mp","edge_updates2"]
 
 def get_logging_location(args, config):
 # logging location
-	out_dir = f"/dccstor/aml-e/logs/{args.log_folder_name}"
+	out_dir = args.log_folder_name
 	
 	if config.simulator == "eth":
 		dataset_name = 'eth'
@@ -220,7 +268,7 @@ def get_finetune_settings(args_ft):
 	model_settings = munchify(model_settings)
 	# Get logging location
 	log_model_name = get_log_model_name(config, args)
-	log_dir = f"{args_ft.model_path}/finetuning/{log_model_name}"
+	log_dir = Path(f"{args_ft.model_path}/finetuning/{log_model_name}")
 	Path(log_dir).mkdir(parents=True, exist_ok=True)
 	# Save settings
 	with open(f'{log_dir}/args.json', 'w') as outfile:
@@ -233,6 +281,35 @@ def get_finetune_settings(args_ft):
 	args = calculate_args(args)
 	args.device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 	return config, model_settings, args, log_dir
+
+def get_inference_settings(args_ft):
+	main_model_dir = Path(args_ft.model_path).parent.parent.absolute()
+	# Fetch args (from pretrained model args path and merge with new finetuning args_ft OR just use args_ft)
+	args_path = f"{main_model_dir}/args.json"
+	with open(args_path) as f_args:
+		args = json.load(f_args)
+	args = munchify(args)
+	args = merge_with_pretrained_args(args, args_ft)
+	# Fetch configs
+	config_path = f"{main_model_dir}/config.json" if args_ft.ft_use_config else f"{args.config_path}"
+	with open(f"{config_path}") as f_config:
+		config = json.load(f_config)
+	config = munchify(config)
+	config = autocomplete(config, args)
+	# Fetch model settings
+	model_settings_path = f"{main_model_dir}/model_settings.json"
+	with open(model_settings_path) as f_model_settings:
+		model_settings = json.load(f_model_settings)
+	model_settings = munchify(model_settings)
+	# Get logging location
+	log_model_name = get_log_model_name(config, args)
+	log_dir = Path(f"{args_ft.model_path}/inference")
+	Path(log_dir).mkdir(parents=True, exist_ok=True)
+	# Calculate some settings
+	args = calculate_args(args)
+	args.device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+	args.load_model = True
+	return config, model_settings, args, log_dir
 	
 def get_settings():
 	"""
@@ -244,8 +321,10 @@ def get_settings():
 	args = munchify(vars(args))
 	if args.finetune:
 		config, model_settings, args, log_dir = get_finetune_settings(args)
+	elif args.inference:
+		config, model_settings, args, log_dir = get_inference_settings(args)
 	else:
-	# Fetch configs from config path
+		# Fetch configs from config path
 		with open(f"{args.config_path}") as f_config:
 			config = json.load(f_config)
 		config = munchify(config)
@@ -275,6 +354,7 @@ def get_settings():
 	args.log_dir = log_dir
 	# Log args, config, and model_settings
 	logging.info('MODEL SETTINGS:')
+	logging.info(model_settings)
 	# Open performance.csv for saving results
 	csv = open_csv(f"{log_dir}/performance_metrics.csv", header=model_settings.header)
 	return config, model_settings, args, log_dir, csv
@@ -328,6 +408,7 @@ def set_seed(seed: int = 0) -> None:
 	# When running on the CuDNN backend, two further options must be set
 	torch.backends.cudnn.deterministic = True
 	torch.backends.cudnn.benchmark = False
+	torch.use_deterministic_algorithms(True, warn_only=True)
 	# Set a fixed value for the hash seed
 	os.environ["PYTHONHASHSEED"] = str(seed)
 	logging.info(f"Random seed set as {seed}")

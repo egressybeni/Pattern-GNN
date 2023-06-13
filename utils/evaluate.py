@@ -4,16 +4,21 @@ Script providing evaluation functions for LGBM and Type2 GNNs.
 import logging
 import torch
 import numpy as np
+import time
 from sklearn import metrics
 from torch_geometric.loader import NeighborLoader, LinkNeighborLoader
 from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score, precision_recall_curve, mean_squared_error
 
 from utils.gcn_utils import remove_reverse, get_batch_size
 
-def metric_per_class(metric, labels, preds, axis=1, **kwargs):
-    return [
-        metric(l.unsqueeze(1), p.unsqueeze(1), **kwargs) for l,p in zip(torch.unbind(labels, dim=axis), torch.unbind(preds, dim=axis))
-    ]
+def metric_per_class(metric, labels, preds, axis=1, infer_pos_label=False, **kwargs):
+    if infer_pos_label:
+        minority_class = [int((l.sum()/len(l))<0.45) for l in torch.unbind(labels, dim=axis)]
+        logging.debug(minority_class)
+        out = [metric(l.unsqueeze(1), p.unsqueeze(1), pos_label=c, **kwargs) for l,p,c in zip(torch.unbind(labels, dim=axis), torch.unbind(preds, dim=axis), minority_class)]
+    else:
+        out = [metric(l.unsqueeze(1), p.unsqueeze(1), **kwargs) for l,p in zip(torch.unbind(labels, dim=axis), torch.unbind(preds, dim=axis))]
+    return out
 
 def compute_binary_metrics(preds, labels):
     """
@@ -116,11 +121,11 @@ def compute_multiclass_metrics(preds, labels):
     accuracies = metric_per_class(metrics.accuracy_score, labels, preds)
     accuracy = np.mean(accuracies)
     # accuracy = accuracy_score(labels, preds)
-    precisions = metric_per_class(precision_score, labels.bool(), preds, zero_division=0)
+    precisions = metric_per_class(precision_score, labels.bool(), preds, infer_pos_label=True, zero_division=0)
     precision = np.mean(precisions)
-    recalls = metric_per_class(recall_score, labels, preds, zero_division=0)
+    recalls = metric_per_class(recall_score, labels, preds, infer_pos_label=True, zero_division=0)
     recall = np.mean(recalls)
-    F1s = metric_per_class(f1_score, labels, preds, zero_division=0)
+    F1s = metric_per_class(f1_score, labels, preds, infer_pos_label=True, zero_division=0)
     F1 = np.mean(F1s)
 
     return accuracy, precision, recall, F1, auc, ap, (fpr, tpr), (precs, recs), F1s
@@ -148,7 +153,7 @@ def compute_multiclass_f1(preds, labels):
 
 
 @torch.no_grad()
-def evaluate(eval_data, model, config, args, topk=False, y_type='binary', only_f1=False, return_preds=False):
+def evaluate(eval_data, model, config, args, topk=False, y_type='binary', only_f1=False, return_preds=False, log_time=False):
     """
     Computes evaluation metrics for homogeneous/ multirelational GNN models in accordance with config parameters
     :param eval_data: Data to be evaluated (can be a list of Data/ HeteroData instances, a NeighborLoader, or simply a
@@ -166,6 +171,7 @@ def evaluate(eval_data, model, config, args, topk=False, y_type='binary', only_f
     preds, targets = [], []
     accs, pres, recs, f1s, aucs, aps = [], [], [], [], [], []
 
+    inference_start_time = time.time()
     if isinstance(eval_data, list):
         for data in eval_data:
             # if config.multi_relational:
@@ -214,6 +220,9 @@ def evaluate(eval_data, model, config, args, topk=False, y_type='binary', only_f
         y = eval_data[tx].y if config.multi_relational else eval_data.y
         targets.append(y)
 
+    if log_time:
+        logging.info(f"Inference Done. Total Inference Time [TIT] = {time.time() - inference_start_time}")
+
     model.embedding = config.generate_embedding
 
     preds = torch.cat(preds)
@@ -236,7 +245,6 @@ def evaluate(eval_data, model, config, args, topk=False, y_type='binary', only_f
             acc, pre, rec, f1, auc, ap, roc_curve, pr_curve, accuracies_per_class = compute_continuous_metrics(preds.cpu(), targets.cpu())
 
     logging.debug(f"preds.shape = {preds.shape}, targets.shape = {targets.shape}")
-    logging.debug(f"{torch.cat([preds.reshape((len(targets), -1)), targets.reshape((len(targets), 1))], dim=1)[:10, :]}")
     if only_f1:
         return f1
     else:

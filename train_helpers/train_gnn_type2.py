@@ -16,9 +16,12 @@ import os, psutil, sys, gc, time, pickle, logging, socket, json, optuna, torch
 from tqdm import tqdm
 import matplotlib.pyplot as plt
 
-from models.gnn_type2 import adapt_model, PNA, GINe, newMLPe #, MLP2
+from models.gnn_type2 import adapt_model, PNA, GINe, GATe, newMLPe #, MLP2
 from utils.evaluate import evaluate
-from utils.gcn_utils import generate_filtered_graph, z_normalize, l2_normalize, GraphData, AddEgoIds, normalize_data, add_reverse, remove_reverse, get_batch_size
+from utils.gcn_utils import (
+	generate_filtered_graph, z_normalize, l2_normalize, GraphData, AddEgoIds, 
+	normalize_data, add_reverse, remove_reverse, get_batch_size
+)
 from utils.util import open_csv, write_csv, set_seed
 
 from torch.utils.tensorboard import SummaryWriter
@@ -26,46 +29,72 @@ from torch.utils.tensorboard import SummaryWriter
 
 script_start = time.time()
 
-def get_model(config, args, params, sample_data, n_classes, readout, residual=False, num_relations=None, node_name=None):
-#set seed
-	if args.torch_seed is not None:
-		set_seed(args.torch_seed)
-		logging.info(f'Seed set to {args.torch_seed}')
-		# Get feature dimensions
+def get_model(config, args, params, sample_data, n_classes, readout, residual=False, 
+	      num_relations=None, node_name=None):
+	# Get feature dimensions
 	if not config.model == "type2_hetero_sage":
 		num_features = sample_data.x.shape[1]
 		edge_dim = sample_data.edge_attr.shape[1] if config.network_type == 'type1' else None # need if??
-		# Load model if requested (e.g., for finetuning or continuing training)
+	# Load model if requested (e.g., for finetuning or continuing training)
 	if args.load_model:
 		logging.info(f"Loading model from {args.model_path}")
 		# model = torch.load(args.model_path)
 		checkpoint = torch.load(f"{args.model_path}/model.pt")
 		model = checkpoint['model']
+		logging.info(f"Loaded model from epoch {checkpoint['epoch']}")
 		model = adapt_model(model, args, num_features, edge_dim, out_dim=n_classes)
 		return model
-		# Select the model
+	# Select the model
 	if config.model == "gin":
 		edge_features = True
 		edge_updates = True if config.edge_updates2 else False
 		config.generate_embedding = False # TODO: implement if needed
-		model = GINe(num_features=num_features, num_gnn_layers=round(params['n_gnn_layers']), n_classes=n_classes,n_hidden=round(params['n_hidden']), embedding=config.generate_embedding, readout=readout,residual=residual, edge_features=edge_features, edge_updates=edge_updates, edge_dim=edge_dim, dropout=params['dropout'],reverse=config.reverse_mp, final_dropout=params['final_dropout'])
+		model = GINe(
+			num_features=num_features, num_gnn_layers=round(params['n_gnn_layers']), n_classes=n_classes, 
+			n_hidden=round(params['n_hidden']), embedding=config.generate_embedding, 
+			readout=readout,residual=residual, edge_features=edge_features, edge_updates=edge_updates, edge_dim=edge_dim, 
+			dropout=params['dropout'],reverse=config.reverse_mp, final_dropout=params['final_dropout']
+			)
+	elif config.model == "gat":
+		edge_features = True
+		edge_updates = True if config.edge_updates2 else False
+		config.generate_embedding = False # TODO: implement if needed
+		model = GATe(
+			num_features=num_features, num_gnn_layers=round(params['n_gnn_layers']), n_classes=n_classes, 
+			n_hidden=round(params['n_hidden']), n_heads=round(params['n_heads']), embedding=config.generate_embedding, 
+			readout=readout,residual=residual, edge_features=edge_features, edge_updates=edge_updates, edge_dim=edge_dim, 
+			dropout=params['dropout'],reverse=config.reverse_mp, final_dropout=params['final_dropout']
+			)
 	elif config.model == "mlp":
 		edge_features = True
 		edge_updates = True if config.edge_updates2 else False
 		config.generate_embedding = False # TODO: implement if needed
-		model = newMLPe(num_features=num_features, num_gnn_layers=round(params['n_gnn_layers']), n_classes=n_classes,n_hidden=round(params['n_hidden']), embedding=config.generate_embedding, readout=readout,residual=residual, edge_features=edge_features, edge_updates=edge_updates, edge_dim=edge_dim, dropout=params['dropout'],reverse=config.reverse_mp, final_dropout=params['final_dropout'])
+		model = newMLPe(
+			num_features=num_features, num_gnn_layers=round(params['n_gnn_layers']), n_classes=n_classes, 
+			n_hidden=round(params['n_hidden']), embedding=config.generate_embedding, 
+			readout=readout,residual=residual, edge_features=edge_features, edge_updates=edge_updates, edge_dim=edge_dim, 
+			dropout=params['dropout'],reverse=config.reverse_mp, final_dropout=params['final_dropout']
+			)
 	elif config.model == "pna":
 		edge_features = True
 		edge_updates = True if config.edge_updates2 else False
 		d = degree(sample_data.edge_index[1], num_nodes=sample_data.num_nodes, dtype=torch.long)
 		deg = torch.bincount(d, minlength=1)
-		model = PNA(num_features=num_features, num_gnn_layers=round(params['n_gnn_layers']), n_classes=n_classes,n_hidden=round(params['n_hidden']), embedding=config.generate_embedding, readout=readout,residual=residual, edge_features=edge_features, edge_updates=edge_updates, edge_dim=edge_dim, dropout=params['dropout'], deg=deg,reverse=config.reverse_mp, final_dropout=params['final_dropout'])
+		model = PNA(
+			num_features=num_features, num_gnn_layers=round(params['n_gnn_layers']), n_classes=n_classes,
+	      	n_hidden=round(params['n_hidden']), embedding=config.generate_embedding, 
+		  	readout=readout, residual=residual, edge_features=edge_features, edge_updates=edge_updates, edge_dim=edge_dim, 
+		  	dropout=params['dropout'], deg=deg,reverse=config.reverse_mp, final_dropout=params['final_dropout']
+			)
 	elif config.model == "rgcn":
 		raise ValueError('RGCN not currently implemented')
 	return model
 	
 	
-def train_gnn_type2(_tr_data, _te_data, _val_data, val_folds, te_inds, config, model_settings, args, csv, log_dir,save_run_embed=False, tb_logging=False, trial=None, **params):
+def train_gnn_type2(
+		_tr_data, _te_data, _val_data, val_folds, te_inds, config, model_settings, 
+		args, csv, log_dir, save_run_embed=False, tb_logging=False, trial=None, **params
+		):
 	"""
     Trains type2 GNN and saves models/ logs performance metrics.
     :param _tr_data: Train data
@@ -96,6 +125,16 @@ def train_gnn_type2(_tr_data, _te_data, _val_data, val_folds, te_inds, config, m
 	
 	if args.y_list is not None:
 		acc_csv = open_csv(log_dir / f"accuracies_per_class.csv", header='run,epoch,'+','.join(args.y_list)+'\n')
+
+	run_file = log_dir / "runs"
+	current_runs = [x for x in pathlib.Path(run_file).glob("*") if 'run' in str(x)]
+	if len(current_runs) == 0:
+		run_id = 1
+	else:
+		run_id = max([int(str(x).split("_")[-1]) for x in current_runs]) + 1
+	pathlib.Path(run_file / f"run_{run_id}").mkdir(parents=True, exist_ok=True)
+
+	checkpoint_path = run_file / f"run_{run_id}/checkpoint_{args.unique_name}.tar"
 		
 	count = 0
 	for obj in gc.get_objects():
@@ -123,9 +162,12 @@ def train_gnn_type2(_tr_data, _te_data, _val_data, val_folds, te_inds, config, m
 				if round(params['loss']) in loss_functions:
 					params['loss'] = loss_functions[round(params['loss'])]
 			except:
-				assert params['loss'] in loss_functions.values(), f"only {list(loss_functions.values())} losses are currently implemented, {params['loss']} is not implemented"
+				assert (
+					params['loss'] in loss_functions.values(), 
+					f"only {list(loss_functions.values())} losses are currently implemented, {params['loss']} is not implemented"
+					)
 				
-				# Get readout
+	# Get readout
 	if args.readout:
 		readout = args.readout
 	elif args.graph_simulator:
@@ -275,13 +317,31 @@ def train_gnn_type2(_tr_data, _te_data, _val_data, val_folds, te_inds, config, m
 				
 			logging.info(f"num_neighbors = {num_neighbors}")
 			if readout == "node" or readout == "graph":
-				train_loader = NeighborLoader(tr_data, input_nodes=tr_input_nodes,num_neighbors=num_neighbors, batch_size=batch_size, shuffle=shuffle, sampler=sampler, num_workers=num_workers, transform=transform,disjoint=args.disjoint)
-				val_loader = NeighborLoader(val_data, input_nodes=val_input_nodes,num_neighbors=num_neighbors, batch_size=batch_size, shuffle=False, num_workers=num_workers, transform=transform,disjoint=args.disjoint)
-				test_loader = NeighborLoader(te_data, input_nodes=te_input_nodes,num_neighbors=num_neighbors, batch_size=batch_size, shuffle=False, num_workers=num_workers, transform=transform,disjoint=args.disjoint)
+				train_loader = NeighborLoader(
+					tr_data, input_nodes=tr_input_nodes,num_neighbors=num_neighbors, batch_size=batch_size, shuffle=shuffle, 
+					sampler=sampler, num_workers=num_workers, transform=transform, disjoint=args.disjoint
+					)
+				val_loader = NeighborLoader(
+					val_data, input_nodes=val_input_nodes,num_neighbors=num_neighbors, batch_size=batch_size, shuffle=False, 
+					num_workers=num_workers, transform=transform, disjoint=args.disjoint
+					)
+				test_loader = NeighborLoader(
+					te_data, input_nodes=te_input_nodes,num_neighbors=num_neighbors, batch_size=batch_size, shuffle=False, 
+					num_workers=num_workers, transform=transform, disjoint=args.disjoint
+					)
 			elif readout == "edge":
-				train_loader = LinkNeighborLoader(tr_data,num_neighbors=num_neighbors, # edge_label_index=tr_data.edge_index[:, tr_inds], edge_label=tr_data.y[tr_inds],batch_size=batch_size, shuffle=shuffle, sampler=sampler)
-				val_loader = LinkNeighborLoader(val_data,num_neighbors=num_neighbors, edge_label_index=val_data.edge_index[:, val_inds], edge_label=val_data.y[val_inds],batch_size=batch_size, shuffle=False)
-				test_loader = LinkNeighborLoader(te_data,num_neighbors=num_neighbors, edge_label_index=te_data.edge_index[:, te_inds], edge_label=te_data.y[te_inds],batch_size=batch_size, shuffle=False)
+				train_loader = LinkNeighborLoader(
+					tr_data,num_neighbors=num_neighbors, # edge_label_index=tr_data.edge_index[:, tr_inds], edge_label=tr_data.y[tr_inds],
+					batch_size=batch_size, shuffle=shuffle, sampler=sampler#, disjoint=args.disjoint
+					)
+				val_loader = LinkNeighborLoader(
+					val_data,num_neighbors=num_neighbors, edge_label_index=val_data.edge_index[:, val_inds], edge_label=val_data.y[val_inds],
+					batch_size=batch_size, shuffle=False#, disjoint=args.disjoint
+					)
+				test_loader = LinkNeighborLoader(
+					te_data,num_neighbors=num_neighbors, edge_label_index=te_data.edge_index[:, te_inds], edge_label=te_data.y[te_inds],
+					batch_size=batch_size, shuffle=False#, disjoint=args.disjoint
+					)
 			else:
 				train_loader = DataLoader(tr_data, shuffle=shuffle, batch_size=batch_size, num_workers=num_workers)
 				val_loader = DataLoader(val_data, shuffle=False, batch_size=batch_size, num_workers=num_workers)
@@ -302,9 +362,9 @@ def train_gnn_type2(_tr_data, _te_data, _val_data, val_folds, te_inds, config, m
 		else:
 			num_relations = None
 			
-		if args.repeat is not None and os.path.isfile(f'/dccstor/aml-e/datasets/model_checkpoints/checkpoint_{args.unique_name}.tar'):
+		if args.repeat is not None and os.path.isfile(checkpoint_path):
 			logging.info('Loading Model...')
-			checkpoint = torch.load(f'/dccstor/aml-e/datasets/model_checkpoints/checkpoint_{args.unique_name}.tar')
+			checkpoint = torch.load(checkpoint_path)
 			model = checkpoint['model']
 		else:
 			model = get_model(config, args, params, sample_data, n_classes, readout, residual=residual, num_relations=num_relations, node_name=node_name)
@@ -317,8 +377,8 @@ def train_gnn_type2(_tr_data, _te_data, _val_data, val_folds, te_inds, config, m
 			optimizer = torch.optim.Adam(model.parameters(), lr=params['lr'], weight_decay=params['weight_decay'])
 		else:
 			optimizer = torch.optim.Adam(model.parameters(), lr=params['lr'])
-			if args.repeat is not None and os.path.isfile(f'/dccstor/aml-e/datasets/model_checkpoints/checkpoint_{args.unique_name}.tar'):
-				optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+		if args.repeat is not None and os.path.isfile(checkpoint_path):
+			optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
 				
 		scheduler = torch.optim.lr_scheduler.ExponentialLR(optimizer, gamma=0.995)
 		if params['loss'] == "ce":
@@ -342,9 +402,9 @@ def train_gnn_type2(_tr_data, _te_data, _val_data, val_folds, te_inds, config, m
 			loss_fn = torch.nn.MSELoss()
 			y_type = 'continuous'
 			
-			# Main training loop
+		# Main training loop
 		epoch, n_waiting_rounds, best_val_loss, best_val_score = 0, 0, 1e9, 0
-		if args.repeat is not None and os.path.isfile(f'/dccstor/aml-e/datasets/model_checkpoints/checkpoint_{args.unique_name}.tar'):
+		if args.repeat is not None and os.path.isfile(checkpoint_path):
 			epoch = checkpoint['epoch']
 		t_max_epoch = 0
 		t_epochs = []
@@ -446,7 +506,7 @@ def train_gnn_type2(_tr_data, _te_data, _val_data, val_folds, te_inds, config, m
 					else:
 						tr_metrics = evaluate(train_loader, model, config, args, y_type=y_type)
 						val_metrics = evaluate(val_loader, model, config, args, y_type=y_type)
-						te_metrics = evaluate(test_loader, model, config, args, y_type=y_type)
+						te_metrics = evaluate(test_loader, model, config, args, y_type=y_type, log_time=True)
 				else:
 					tr_metrics = evaluate(tr_data, model, config, args, y_type=y_type)
 					val_metrics = evaluate(val_data, model, config, args, y_type=y_type)
@@ -454,6 +514,11 @@ def train_gnn_type2(_tr_data, _te_data, _val_data, val_folds, te_inds, config, m
 				best_tr_metrics = tr_metrics
 				best_val_metrics = val_metrics
 				best_te_metrics = te_metrics
+				# save model
+				if args.save_model:
+					save_path = run_file / f"run_{run_id}/model.pt"
+					# torch.save(model, save_path)
+					torch.save({'epoch': epoch,'model_state_dict': model.state_dict(),'model': model,'optimizer_state_dict': optimizer.state_dict(),'loss': tr_loss,}, save_path)
 			elif tb_logging:
 				if config.batching:
 					k_eval = 50
@@ -516,7 +581,7 @@ def train_gnn_type2(_tr_data, _te_data, _val_data, val_folds, te_inds, config, m
 			
 			if t_left < 0 and args.repeat is not None:
 				logging.info(f"Saving model and submitting new job")
-				torch.save({'epoch': epoch,'model': model,'optimizer_state_dict': optimizer.state_dict()}, f'/dccstor/aml-e/datasets/model_checkpoints/checkpoint_{args.unique_name}.tar')
+				torch.save({'epoch': epoch,'model': model,'optimizer_state_dict': optimizer.state_dict()}, checkpoint_path)
 				# if int(command_list[idx]) > 0:
 				# 	re_run(mem, command)
 					
@@ -541,15 +606,7 @@ def train_gnn_type2(_tr_data, _te_data, _val_data, val_folds, te_inds, config, m
 				
 				if trial.should_prune():
 					raise optuna.exceptions.TrialPruned()
-					
-					
-	run_file = log_dir / "runs"
-	current_runs = [x for x in pathlib.Path(run_file).glob("*") if 'run' in str(x)]
-	if len(current_runs) == 0:
-		run_id = 1
-	else:
-		run_id = max([int(str(x).split("_")[-1]) for x in current_runs]) + 1
-	pathlib.Path(run_file / f"run_{run_id}").mkdir(parents=True, exist_ok=True)
+
 	
 	# saving embeddings from current run
 	if save_run_embed:
@@ -557,7 +614,7 @@ def train_gnn_type2(_tr_data, _te_data, _val_data, val_folds, te_inds, config, m
 		torch.save(best_val_embed.detach().cpu(), run_file / f"run_{run_id}/best_val_embed.pt")
 		torch.save(best_te_embed.detach().cpu(), run_file / f"run_{run_id}/best_te_embed.pt")
 		
-		# saving train losses
+	# saving train losses
 	df = pd.DataFrame({'train_loss': train_losses, 'val_loss': val_losses})
 	df.to_csv(run_file / f"run_{run_id}/train_losses.csv")
 	
@@ -579,14 +636,8 @@ def train_gnn_type2(_tr_data, _te_data, _val_data, val_folds, te_inds, config, m
 		plt.ylabel(y_label)
 		plt.savefig(run_file / f"run_{run_id}/{name}.png")
 		plt.close()
-		
-		# saving model
-	if args.save_model:
-		save_path = run_file / f"run_{run_id}/model.pt"
-		# torch.save(model, save_path)
-		torch.save({'epoch': epoch,'model_state_dict': model.state_dict(),'model': model,'optimizer_state_dict': optimizer.state_dict(),'loss': tr_loss,}, save_path)
-		
-		# logging train, val, test metrics in general performance file
+			
+	# logging train, val, test metrics in general performance file
 	tr_metric_list = np.array(tr_metric_list).mean(0)
 	val_metric_list = np.array(val_metric_list).mean(0)
 	te_metric_list = np.array(te_metric_list).mean(0)
@@ -603,11 +654,11 @@ def train_gnn_type2(_tr_data, _te_data, _val_data, val_folds, te_inds, config, m
 	if args.y_list is not None: write_csv(acc_csv, [f"run_{run_id}", *te_acc_list])
 	
 	if tb_logging:
-	# logging.info(f"Closing Tensorboard.")
+		# logging.info(f"Closing Tensorboard.")
 		writer.close()
 		
-		# process = psutil.Process(os.getpid())
-		# logging.debug(f"mem use: {process.memory_info().rss / 1024 ** 2:.2f}")
+	# process = psutil.Process(os.getpid())
+	# logging.debug(f"mem use: {process.memory_info().rss / 1024 ** 2:.2f}")
 	model.cuda()
 	model.cpu()
 	del model
@@ -621,7 +672,264 @@ def train_gnn_type2(_tr_data, _te_data, _val_data, val_folds, te_inds, config, m
 	else:
 		return val_metric_list[3], best_val_loss, model, best_tr_embed, best_val_embed, best_te_embed, run_id
 		
+
+def test_only_gnn_type2(_tr_data, _te_data, _val_data, val_folds, te_inds, config, model_settings, args, csv, log_dir, save_run_embed=False, tb_logging=False, trial=None, **params):
+	"""
+    Trains type2 GNN and saves models/ logs performance metrics.
+    :param _tr_data: Train data
+    :param _val_data: Val data (optional)
+    :param _te_data: Test data
+    :param val_folds: List of validation folds (list of tuples)
+    :param te_inds: edge indices used for testing
+    :param config: Config file
+    :param model_settings: Model settings file
+    :param args: Auxiliary command line arguments
+    :param csv: CSV file to which performance metrics and hyperparameters are being logged
+    :param log_dir: Path to log directory
+    :param params: Dictionary containing hyperparameter values
+    :return: Returns torch model
+    """
 		
+	#set seed
+	if args.torch_seed is not None:
+		set_seed(args.torch_seed)
+		logging.info(f'Seed set to {args.torch_seed}')
+
+	device = args.device
+	
+	if args.y_list is not None:
+		acc_csv = open_csv(log_dir / f"accuracies_per_class.csv", header='run,epoch,'+','.join(args.y_list)+'\n')
+
+	run_file = log_dir / "runs"
+	current_runs = [x for x in pathlib.Path(run_file).glob("*") if 'run' in str(x)]
+	if len(current_runs) == 0:
+		run_id = 1
+	else:
+		run_id = max([int(str(x).split("_")[-1]) for x in current_runs]) + 1
+	pathlib.Path(run_file / f"run_{run_id}").mkdir(parents=True, exist_ok=True)
+	
+	node_name = None
+	args.node_name = node_name
+	
+	# Get readout
+	if args.readout:
+		readout = args.readout
+	elif args.graph_simulator:
+		readout = _tr_data.readout
+	elif config.simulator == 'eth':
+		readout = 'node'
+	elif config.network_type == 'type1':
+		readout = 'edge'
+	else:
+		readout = 'node'
+	args.readout = readout
+	
+	if config.batching:
+		batch_size = config.batch_size
+	
+	logging.info("Using Cuda GPU" if torch.cuda.is_available() else "No CUDA GPU available")
+
+	## Set parameters that might need rounding or a dictionary lookup -- normalization_method, aggregation, loss_function
+	# e.g. if categorical parameter, but random float is used in bayesian opt for the parameter
+	# normalization method
+	normalization_methods = {"z_normalize": z_normalize, "l2_normalize": l2_normalize}
+	if 'norm_method' in params:
+		if params['norm_method'] in normalization_methods:
+			fn_norm = normalization_methods[params['norm_method']]
+		else:
+			normalization_methods = [z_normalize, l2_normalize]
+			fn_norm = normalization_methods[round(params['norm_method'])]
+			# node aggregation function
+	aggr = ['sum', 'mean', 'max']
+	if 'aggr' in params:
+		if params['aggr'] not in aggr:
+			params['aggr'] = aggr[round(params['aggr'])]
+	# loss function and n_classes
+	y_classes = _tr_data.y.shape[1] if 'y' in _tr_data else _tr_data[node_name].y.shape[1]
+	if y_classes > 1:
+		n_classes = y_classes
+	else:
+		n_classes = 1 if params['loss'] in ["bce", "mse"] else 2 #### TODO: automate this! and generalise code to more than 2 classes
+	##### DONE #####
+		
+	# Initialize lists for some metrics we want to collect
+	tr_metric_list, val_metric_list, te_metric_list = [], [], []
+	tr_acc_list, val_acc_list, te_acc_list = [], [], []
+	epoch_save = 0
+	
+	## Iterate over validation folds. In each iteration, split train/valid data, create data loaders, TRAIN model, VALIDATE model and TEST model
+	for tr_inds, val_inds in val_folds[:1]:
+	
+		## Split train and val data and normalize
+		if not config.multi_relational:
+			if _val_data is not None:
+				logging.info(f"using tr_, val_, te_ data")
+				tr_data, val_data = _tr_data, _val_data
+			elif config.simulator == "eth":
+				tr_data, val_data = generate_filtered_graph(node_indices=[tr_inds, val_inds], data=_tr_data, relabel_nodes=True)
+			elif readout == 'edge' and _val_data is not None:
+				tr_data = GraphData(x=_tr_data.x.detach().clone(), y=_tr_data.y.detach().clone(),edge_index=_tr_data.edge_index.detach().clone(),edge_attr=_tr_data.edge_attr.detach().clone())
+				val_data = GraphData(x=_val_data.x.detach().clone(), y=_val_data.y.detach().clone(),edge_index=_val_data.edge_index.detach().clone(),edge_attr=_val_data.edge_attr.detach().clone())
+			else:
+				tr_data, val_data = generate_filtered_graph(node_indices=[tr_inds, val_inds], data=_tr_data, relabel_nodes=True)
+			if not args.edges == 'none':
+				tr_data, val_data, te_data = normalize_data(tr_data, val_data, _te_data, fn_norm, device)
+		else:
+			raise ValueError('config.multi_relational not implemented')
+			
+		if config.batching:
+			# if args.n_gnn_layers is not None:
+			# 	logging.info(f"setting no. gnn layers to {args.n_gnn_layers}")
+			# 	params['n_gnn_layers'] = args.n_gnn_layers
+			num_neighbors = config.neighbor_list
+			num_neighbors = [num_neighbors[i] for i in range(round(params['n_gnn_layers']))]
+
+			tr_input_nodes = torch.arange(tr_data.x.shape[0])
+			val_input_nodes = torch.arange(val_data.x.shape[0])
+			te_input_nodes = torch.arange(te_data.x.shape[0])
+			
+			tr_data.node_indices = tr_input_nodes
+			val_data.node_indices = val_input_nodes
+			te_data.node_indices = te_input_nodes
+				
+			sampler = None
+			shuffle = True
+				
+			num_workers = 0
+			
+			if args.y_from_file or config.simulator == "eth":
+				tr_inds, val_inds = val_folds[0]
+				tr_input_nodes = tr_inds
+				val_input_nodes = val_inds
+				te_input_nodes = te_inds
+				tr_data.node_indices = tr_input_nodes
+				val_data.node_indices = val_input_nodes
+				te_data.node_indices = te_input_nodes
+				
+			for data in [tr_data, val_data, te_data]:
+				data.readout = args.readout
+				
+			for name, data in zip(['train', 'validation', 'test'], [tr_data, val_data, te_data]):
+				logging.info(f"{name} shapes: x = {data.x.shape}, y = {data.y.shape}, edge_index = {data.edge_index.shape}, edge_attr = {data.edge_attr.shape}")
+				
+			if config.reverse_mp:
+				tr_data = add_reverse(tr_data)
+				val_data = add_reverse(val_data)
+				te_data = add_reverse(te_data)
+				
+			if args.ego:
+				transform = AddEgoIds()
+			else:
+				transform = None
+				
+			logging.info(f"num_neighbors = {num_neighbors}")
+			if readout == "node" or readout == "graph":
+				train_loader = NeighborLoader(tr_data, input_nodes=tr_input_nodes,num_neighbors=num_neighbors, batch_size=batch_size, shuffle=shuffle, sampler=sampler, num_workers=num_workers, transform=transform,disjoint=args.disjoint)
+				val_loader = NeighborLoader(val_data, input_nodes=val_input_nodes,num_neighbors=num_neighbors, batch_size=batch_size, shuffle=False, num_workers=num_workers, transform=transform,disjoint=args.disjoint)
+				test_loader = NeighborLoader(te_data, input_nodes=te_input_nodes,num_neighbors=num_neighbors, batch_size=batch_size, shuffle=False, num_workers=num_workers, transform=transform,disjoint=args.disjoint)
+			elif readout == "edge":
+				train_loader = LinkNeighborLoader(
+					tr_data,num_neighbors=num_neighbors, # edge_label_index=tr_data.edge_index[:, tr_inds], edge_label=tr_data.y[tr_inds],
+					batch_size=batch_size, shuffle=shuffle, sampler=sampler
+					)
+				val_loader = LinkNeighborLoader(val_data,num_neighbors=num_neighbors, edge_label_index=val_data.edge_index[:, val_inds], edge_label=val_data.y[val_inds],batch_size=batch_size, shuffle=False)
+				test_loader = LinkNeighborLoader(te_data,num_neighbors=num_neighbors, edge_label_index=te_data.edge_index[:, te_inds], edge_label=te_data.y[te_inds],batch_size=batch_size, shuffle=False)
+			else:
+				train_loader = DataLoader(tr_data, shuffle=shuffle, batch_size=batch_size, num_workers=num_workers)
+				val_loader = DataLoader(val_data, shuffle=False, batch_size=batch_size, num_workers=num_workers)
+				test_loader = DataLoader(te_data, shuffle=False, batch_size=batch_size, num_workers=num_workers)
+				
+				# tr_data, val_data, te_data = tr_data.to(device), val_data.to(device), te_data.to(device)
+				
+		if not config.multi_relational:
+			logging.info(f"test_loader = {test_loader}")
+			sample_batch = next(iter(test_loader))
+			if config.reverse_mp: sample_batch = remove_reverse(sample_batch)
+			_tr_data = sample_batch
+			sample_data = sample_batch
+			
+		model = get_model(config, args, params, sample_data, n_classes, readout=None)
+		model.to(device)
+		
+		if params['loss'] == "ce":
+			y_type = 'binary'
+		elif params['loss'] == "bce":
+			y_type = 'binary'
+		elif params['loss'] == "bce_multi":
+			y_type = 'multiclass'
+		elif params['loss'] == "mse":
+			y_type = 'continuous'
+			
+		model.eval()
+		with torch.no_grad():
+			if args.save_preds:
+				tr_metrics, best_tr_preds = evaluate(train_loader, model, config, args, y_type=y_type, return_preds=True)
+				val_metrics, best_val_preds = evaluate(val_loader, model, config, args, y_type=y_type, return_preds=True)
+				te_metrics, best_te_preds = evaluate(test_loader, model, config, args, y_type=y_type, return_preds=True)
+			else:
+				tr_metrics = evaluate(train_loader, model, config, args, y_type=y_type)
+				val_metrics = evaluate(val_loader, model, config, args, y_type=y_type)
+				te_metrics = evaluate(test_loader, model, config, args, y_type=y_type)
+
+		tr_metric_list.append([epoch_save, *tr_metrics[:5]])
+		val_metric_list.append(val_metrics[:5])
+		te_metric_list.append(te_metrics[:5])
+		tr_acc_list.append([epoch_save, *tr_metrics[-1]])
+		val_acc_list.append([epoch_save, *val_metrics[-1]])
+		te_acc_list.append([epoch_save, *te_metrics[-1]])
+		curves = dict(zip(['roc_curve', 'p_r_curve'], te_metrics[6:8]))
+		curves_labels = dict(zip(['roc_curve', 'p_r_curve'], [('fpr','tpr'), ('precision', 'recall')]))
+	
+	# saving roc and p_r curves as plots
+	# with open(run_file / f"run_{run_id}/curves.pickle", 'wb') as handle:
+	#     pickle.dump(curves, handle, protocol=pickle.HIGHEST_PROTOCOL)
+	if args.save_preds:
+		for suff, pred in zip(['tr', 'val', 'te'], [best_tr_preds, best_val_preds, best_te_preds]):
+			with open(run_file / f"run_{run_id}/{suff}_preds.pickle", 'wb') as handle:
+				pickle.dump(pred, handle, protocol=pickle.HIGHEST_PROTOCOL)
+	for name, values in curves.items():
+		x,y = values
+		x_label, y_label = curves_labels[name]
+		# df = pd.DataFrame({x_label: x, y_label: y})
+		# df.to_csv(run_file / f"run_{run_id}/{name}.csv")
+		plt.plot(x, y)
+		plt.title(f"{name}")
+		plt.xlabel(x_label)
+		plt.ylabel(y_label)
+		plt.savefig(run_file / f"run_{run_id}/{name}.png")
+		plt.close()
+		
+	# saving model
+	# if args.save_model:
+	# 	save_path = run_file / f"run_{run_id}/model.pt"
+	# 	# torch.save(model, save_path)
+	# 	torch.save({'epoch': epoch,'model_state_dict': model.state_dict(),'model': model,'optimizer_state_dict': optimizer.state_dict(),'loss': tr_loss,}, save_path)
+		
+	# logging train, val, test metrics in general performance file
+	tr_metric_list = np.array(tr_metric_list).mean(0)
+	val_metric_list = np.array(val_metric_list).mean(0)
+	te_metric_list = np.array(te_metric_list).mean(0)
+	tr_acc_list = np.array(tr_acc_list).mean(0)
+	val_acc_list = np.array(val_acc_list).mean(0)
+	te_acc_list = np.array(te_acc_list).mean(0)
+	paramss_reordered = [params[x] for x in model_settings.params.keys()]
+	logs = [f"run_{run_id}", "None", *paramss_reordered, *tr_metric_list, *val_metric_list, *te_metric_list]
+	write_csv(csv, logs)
+	if args.y_list is not None: write_csv(acc_csv, [f"run_{run_id}", *te_acc_list])
+		
+	# process = psutil.Process(os.getpid())
+	# logging.debug(f"mem use: {process.memory_info().rss / 1024 ** 2:.2f}")
+	model.cuda()
+	model.cpu()
+	del model
+	gc.collect()
+	torch.cuda.empty_cache()
+	model = None
+	
+	return True
+		
+
+
 def bayes_opt_tune_type2_gnn(_tr_data, _te_data, _val_data, val_folds, te_inds, config, model_settings, args, csv, log_dir):
 
 	val_f1s, te_f1s = [], []

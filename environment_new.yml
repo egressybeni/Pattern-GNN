@@ -1,4 +1,4 @@
-name: oko
+name: multi_gnn
 channels:
     - conda-forge
     - anaconda
@@ -8,7 +8,7 @@ channels:
 dependencies:
     - python=3.8
     - pytorch::pytorch=1.11.0=py3.8_cuda11.3_cudnn8.2.0_0
-    - pyg::pyg=2.1.0
+    - pyg::pyg=2.2.0
     - conda-forge::bayesian-optimization
     - IPython
     - tqdm
@@ -19,6 +19,7 @@ dependencies:
     - optuna
     - tensorboard
     - psutil
+    - ipykernel
     - pip:
           - datatable
           - torch-geometric-temporal
