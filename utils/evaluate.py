@@ -8,8 +8,10 @@ import time
 from sklearn import metrics
 from torch_geometric.loader import NeighborLoader, LinkNeighborLoader
 from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score, precision_recall_curve, mean_squared_error
+import torchmetrics
 
 from utils.gcn_utils import remove_reverse, get_batch_size
+from utils.util import get_edge_id_mask, add_center_edges
 
 def metric_per_class(metric, labels, preds, axis=1, infer_pos_label=False, **kwargs):
     if infer_pos_label:
@@ -27,7 +29,7 @@ def compute_binary_metrics(preds, labels):
     :param labels: Binary target labels
     :return: Accuracy, illicit precision/ recall/ F1, and ROC AUC scores
     """
-    logging.debug(f"preds.shape = {preds.shape}, labels.shape = {labels.shape}")
+    # logging.debug(f"preds.shape = {preds.shape}, labels.shape = {labels.shape}")
     if len(preds.shape) > 1 and preds.shape[1] > 1:
         probs = preds[:,1]
         preds = preds.argmax(dim=-1)
@@ -130,6 +132,24 @@ def compute_multiclass_metrics(preds, labels):
 
     return accuracy, precision, recall, F1, auc, ap, (fpr, tpr), (precs, recs), F1s
 
+def compute_multiclass_scores_accuracy_only(preds, labels):
+    """
+    Computes accuracy based on raw/ normalized model predictions
+    :param preds: Raw (or normalized) predictions (can vary threshold here if raw scores are provided)
+    :param labels: Binary target labels
+    :return: Accuracy, accuracz for the F1 score and default values (0) for precision, recall, and ROC AUC scores
+    """
+    
+    preds = preds.max(1)[1]
+    labels = labels.squeeze()
+    n_c = int(labels.max()) + 2
+    accuracy_fct = torchmetrics.Accuracy(task="multiclass", num_classes=n_c)
+    accuracy = accuracy_fct(preds, labels)
+
+    accuracy, precision, recall, F1, auc, ap, (fpr, tpr), (precs, recs), F1s = accuracy, 0, 0, accuracy, 0, 0, ([0], [0]), ([0], [0]), [0]
+
+    return accuracy, precision, recall, F1, auc, ap, (fpr, tpr), (precs, recs), F1s
+
 def compute_continuous_f1(preds, labels):
     """
     Computes metrics based on raw/ normalized model predictions
@@ -150,10 +170,19 @@ def compute_multiclass_f1(preds, labels):
     F1 = np.mean(F1s)
     return F1
 
+def compute_multiclass_accuracy_only(preds, labels):
+    preds = preds.max(1)[1]
+    labels = labels.squeeze()
+    n_c = int(labels.max()) + 2
+    accuracy_fct = torchmetrics.Accuracy(task="multiclass", num_classes=n_c)
+    accuracy = accuracy_fct(preds, labels)
+    # print(accuracy)
+    return accuracy
+
 
 
 @torch.no_grad()
-def evaluate(eval_data, model, config, args, topk=False, y_type='binary', only_f1=False, return_preds=False, log_time=False):
+def evaluate(eval_data, model, config, args, topk=False, y_type='binary', only_f1=False, return_preds=False, log_time=False, inds=None, verbose=False, data=None):
     """
     Computes evaluation metrics for homogeneous/ multirelational GNN models in accordance with config parameters
     :param eval_data: Data to be evaluated (can be a list of Data/ HeteroData instances, a NeighborLoader, or simply a
@@ -191,19 +220,24 @@ def evaluate(eval_data, model, config, args, topk=False, y_type='binary', only_f
                     break
                 i+=1
             if config.reverse_mp: batch = remove_reverse(batch)
+            # if args.readout == "edge": batch = add_center_edges(data, batch, inds)
             batch.to(args.device)
             _batch_size = get_batch_size(config, args, batch)
+            if args.readout == "edge": 
+                batch_indices, batch = get_edge_id_mask(batch, inds, verbose=verbose)
+            else: 
+                batch_indices = torch.arange(_batch_size)
             # if config.multi_relational:
             if config.model == "type2_hetero_sage":
                 eval_pred, _ = model(batch)
-                eval_pred = eval_pred[:_batch_size].detach().cpu()
-                target = batch['tx'].y[:_batch_size].cpu()
+                eval_pred = eval_pred[batch_indices].detach().cpu()
+                target = batch['tx'].y[batch_indices].cpu()
             # elif not config.multi_relational:
             else:
                 eval_pred, _ = model(batch)
-                eval_pred = eval_pred[:_batch_size].detach().cpu()
-                target = batch.y[:_batch_size].cpu()
-            logging.debug(f"eval_pred.shape = {eval_pred.shape}")
+                eval_pred = eval_pred[batch_indices].detach().cpu()
+                target = batch.y[batch_indices].cpu()
+            # logging.debug(f"eval_pred.shape = {eval_pred.shape}")
             preds.append(eval_pred)
             targets.append(target)
     else:
@@ -235,6 +269,8 @@ def evaluate(eval_data, model, config, args, topk=False, y_type='binary', only_f
             f1 = compute_multiclass_f1(preds.cpu(), targets.cpu())
         elif y_type == 'continuous':
             f1 = compute_continuous_f1(preds.cpu(), targets.cpu())
+        elif y_type == 'multiclass1':
+            f1 = compute_multiclass_accuracy_only(preds.cpu(), targets.cpu())
     else:
         if y_type == 'binary':
             acc, pre, rec, f1, auc, ap, roc_curve, pr_curve = compute_binary_metrics(preds.cpu(), targets.cpu())
@@ -243,8 +279,9 @@ def evaluate(eval_data, model, config, args, topk=False, y_type='binary', only_f
             acc, pre, rec, f1, auc, ap, roc_curve, pr_curve, accuracies_per_class = compute_multiclass_metrics(preds.cpu(), targets.cpu())
         elif y_type == 'continuous':
             acc, pre, rec, f1, auc, ap, roc_curve, pr_curve, accuracies_per_class = compute_continuous_metrics(preds.cpu(), targets.cpu())
+        elif y_type == 'multiclass1':
+            acc, pre, rec, f1, auc, ap, roc_curve, pr_curve, accuracies_per_class = compute_multiclass_scores_accuracy_only(preds.cpu(), targets.cpu())
 
-    logging.debug(f"preds.shape = {preds.shape}, targets.shape = {targets.shape}")
     if only_f1:
         return f1
     else:

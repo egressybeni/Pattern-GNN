@@ -4,6 +4,7 @@ from itertools import compress
 from collections import Counter
 import networkx as nx
 import numpy as np
+import pandas as pd
 import torch
 from torch_geometric.utils.convert import from_networkx
 from torch_geometric.data import Data, HeteroData
@@ -619,7 +620,7 @@ class GraphSimulator(object):
             timestamps = torch.cat([timestamps, timestamps], dim=0)
             timestamps2 = torch.cat([timestamps2, timestamps2], dim=0)
         # edge_attr = timestamps.float()
-        edge_attr = torch.cat([timestamps.reshape((-1,1)).float(), timestamps2.reshape((-1,1)).float()], dim=1)
+        edge_attr = torch.cat([timestamps.reshape((-1,1)).float(), timestamps2.reshape((-1,1)).float(), torch.ones((total_edges, 1)).float()], dim=1)
         num_samples = total_nodes if self.readout == 'node' else total_edges
         x = torch.ones((total_nodes, 1))
         y = torch.zeros((num_samples, 1)).long()
@@ -653,6 +654,10 @@ functions = {
     'C4_check':         {"set_y": Cn_check(4),      "default": 6,  "delta": lambda x: 3**(x-4)-0.5     }, # (5,2.5)
     'C5_check':         {"set_y": Cn_check(5),      "default": 6,  "delta": lambda x: 4**(x-4)-0.5     }, # (5,2.5)
     'C6_check':         {"set_y": Cn_check(6),      "default": 6,  "delta": lambda x: 5**(x-4)-0.5     }, # (5,2.5)
+    'C7_check':         {"set_y": Cn_check(7),      "default": 6,  "delta": lambda x: 3**(x-4)-0.5     }, # (5,2.5)
+    'C8_check':         {"set_y": Cn_check(8),      "default": 6,  "delta": lambda x: 4**(x-4)-0.5     }, # (5,2.5)
+    'C9_check':         {"set_y": Cn_check(9),      "default": 6,  "delta": lambda x: 5**(x-4)-0.5     }, # (5,2.5)
+    'C10_check':        {"set_y": Cn_check(10),     "default": 6,  "delta": lambda x: 5**(x-4)-0.5     }, # (5,2.5)
     'C2_count':         {"set_y": C2_count,         "default": 6,  "delta": None},
     'C3_count':         {"set_y": C3_count,         "default": 6,  "delta": None},
     'C4_count':         {"set_y": C4_count,         "default": 6,  "delta": None},
@@ -770,6 +775,13 @@ def get_gnn_data_from_simulator(config, args, num_edges=None, max_time=None, net
         for data in [tr_data, val_data, te_data]:
             outfile.write(','.join([str(i) for i in list(sum(data.y).numpy())]))
             outfile.write(f',{len(data.y)}\n')
+    ################# COLLAPSE PARALLEL EDGES #################
+    if args.collapse_multi:
+        logging.info(f"Collapsing Parallel Edges")
+        tr_data = sim_collapse(tr_data)
+        val_data = sim_collapse(val_data)
+        te_data = sim_collapse(te_data)
+    ################# ####################### #################
     return tr_data, val_data, te_data
 
 
@@ -810,3 +822,19 @@ def apply_simulator(data_list, args, return_threshholds=False):
         data_out.append(data)
     if return_threshholds: data_out.append(threshholds)
     return data_out
+
+def sim_collapse(data):
+    edge_index = data.edge_index
+    edge_attr = data.edge_attr
+    logging.info(f"edge_index.shape before = {data.edge_index.shape}")
+    edges = torch.cat([edge_index.T, edge_attr], dim=1).numpy()
+    edges_df = pd.DataFrame(edges)
+    # cols 0 and 1 are index, cols 2 and 3 are timestamps, col 4 (-1) is ones. Use min agg for timestamps and sum for ones.
+    edges_agg = edges_df.groupby([0,1]).agg({2: 'min', 3:'min', 4:'sum'}).reset_index()
+    edges = torch.tensor(np.array(edges_agg))
+    data.edge_index = edges[:, :2].T.long()
+    data.edge_attr = edges[:, 2:].float()
+    data.timestamps = edges[:, 2].float()
+    logging.info(f"edge_index.shape after = {data.edge_index.shape}")
+    return data
+    # return GraphData(x=data.x, y=data.y, edge_index=edge_index, edge_attr=edge_attr, readout=data.readout, num_nodes=data.num_nodes)

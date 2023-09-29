@@ -35,6 +35,9 @@ pretrain_feats_sim = {
 	"binary_complex": [
 		'C4_check', 'C5_check', 'C6_check', 'SG2_check', 'BP2_check'
 		],
+	"binary_cycles": [
+		'C2_check', 'C3_check', 'C4_check', 'C5_check', 'C6_check', 'C7_check', 'C8_check', 'C9_check', 'C10_check'
+		],
 	"binary_full": [
 		'deg_in_check', 'deg_out_check', 'fan_in_check', 'fan_out_check', 'ratio_in_check', 'ratio_out_check', 'deg_in_timespan_check', 
 		'timevar_in_check', 'timevar_out_check', 'max_deg_in_check', 'C2_check', 'C3_check', 'C4_check', 'C5_check', 'C6_check', 
@@ -56,7 +59,7 @@ pretrain_feats_sim = {
 pretrain_feats_mf = {"all_mf": None,"aml-e_medium": ['FanIn [2:3)', 'FanIn [3:4)', 'FanIn [4:5)','FanOut [2:3)', 'FanOut [3:4)', 'FanOut [4:5)','DegIn [2:3)', 'DegIn [30:inf)','DegOut [2:3)', 'DegOut [30:inf)','ScatGat [2:3)','LCCycle [2:3)'],"eth": ['FanIn [2:3)', 'FanIn [3:4)','FanOut [2:3)', 'FanOut [3:4)', 'DegIn [2:3)', 'DegIn [3:4)', 'DegIn [30:inf)','DegOut [2:3)', 'DegOut [3:4)', 'DegOut [30:inf)','ScatGat [2:3)', 'ScatGat [3:4)','LCCycle [2:3)', 'LCCycle [3:4)', 'LCCycle [4:5)', 'LCCycle [5:6)', 'LCCycle [6:7)', 'LCCycle [7:8)']}
 pretrain_choices = list(pretrain_feats_sim.keys()) + list(pretrain_feats_mf.keys())
 model_choices = ["gcn", "mlp", "type1", "type2", "type2_hetero_sage","type2_hetero_gat", "type2_gnn_mlp", "pc_gnn", "type2_homo_gat", "gin", "gat", "gine", "pna", "gcnn", "old_gin"]
-gnn_model_choices = ["type2_hetero_sage", "type2_hetero_gat", "type2_gnn_mlp", "pc_gnn", "type2_homo_gat", "gin", "gat", "rgcn","type2_hetero_sage_sampled", "type2_hetero_gat_sampled", "type2_gnn_mlp_sampled", "pc_gnn_sampled", "type2_homo_gat_sampled", "gin_sampled", "gat_sampled", "gine", "custom"]
+gnn_model_choices = ["type2_hetero_sage", "type2_hetero_gat", "type2_gnn_mlp", "pc_gnn", "type2_homo_gat", "gin", "gat", "rgcn","type2_hetero_sage_sampled", "type2_hetero_gat_sampled", "type2_gnn_mlp_sampled", "pc_gnn_sampled", "type2_homo_gat_sampled", "gin_sampled", "gat_sampled", "gine", "custom", "gcn"]
 
 
 def open_csv(file_name, header):
@@ -117,6 +120,9 @@ def load_options():
 	parser.add_argument("--emb_file", default=None, type=str)
 	parser.add_argument("--tb", action='store_true', help="Use tensorboard logging")
 	parser.add_argument("--ports", action='store_true', help="Add unique neighbour port numbers to edge attributes")
+	parser.add_argument("--add_node_ids", action='store_true', help="Add unique integer node IDs")
+	parser.add_argument("--random_ports", action='store_true', help="Shuffle the ports instead of adding them according to timestamps")
+	parser.add_argument("--collapse_multi", action='store_true', help="Collapse parallel edges into a single edge at load time")
 	parser.add_argument("--reverse_mp", action='store_true', help="Use reverse MP. If True, then this overpowers config file.")
 	parser.add_argument("--edge_updates2", action='store_true', help="Use edge updates. If True, then this overpowers config file.")
 	parser.add_argument("-tds", "--time_deltas", action='store_true', help="Add in and out time deltas to edge attributes")
@@ -412,3 +418,56 @@ def set_seed(seed: int = 0) -> None:
 	# Set a fixed value for the hash seed
 	os.environ["PYTHONHASHSEED"] = str(seed)
 	logging.info(f"Random seed set as {seed}")
+
+def tuple_sort(a):
+	return  a[:,a.sort(dim=1).indices[0]]
+
+def tuple_sort_2(a):
+	return  a[a.sort(dim=0).indices[:,0],:]
+
+def add_center_edges(data, batch, inds):
+	original_edge_ids = inds[batch.input_id.cpu()]
+	batch_edge_ids = torch.isin(batch.edge_attr[:, -1].cpu(), torch.tensor(original_edge_ids))
+	logging.debug(batch_edge_ids.sum())
+	batch_keep = torch.logical_not(batch_edge_ids)
+	orignal_edge_index_data = data.edge_index[:, original_edge_ids]
+	orignal_edge_index_batch = orignal_edge_index_data.clone()
+	orignal_edge_index_batch.apply_(lambda x: (batch.n_id == x).nonzero()[0][0])
+	# logging.debug("EDGE_INDEX")
+	# logging.debug(tuple_sort(batch.edge_index[:, batch_edge_ids])[:,:5])
+	# logging.debug(tuple_sort(orignal_edge_index_batch)[:,:5])
+	# logging.debug("EDGE_ATTR")
+	# logging.debug(tuple_sort_2(batch.edge_attr[batch_edge_ids, :])[:5, :])
+	# logging.debug(tuple_sort_2(data.edge_attr[original_edge_ids, :-1])[:5, :])
+	# logging.debug("Y")
+	# logging.debug(batch.y[batch_edge_ids].sum(), data.y[original_edge_ids].sum())
+	# logging.debug("TIMESTAMPS")
+	# logging.debug(batch.timestamps[batch_edge_ids].sort().values[:5], data.timestamps[original_edge_ids].sort().values[:5])
+	# logging.debug("E_ID")
+	# logging.debug(batch.input_id.sort().values[:5])
+	# logging.debug(torch.tensor(original_edge_ids).sort().values[:5])
+	# logging.debug(batch.edge_attr[:, -1].flatten().sort().values[:15])
+	# logging.debug(batch.e_id.sort().values[:15])
+	# logging.debug(batch.e_id[batch_edge_ids].sort().values[:5])
+	batch.edge_index = torch.cat((batch.edge_index[:, batch_keep], orignal_edge_index_batch), dim=1)
+	if batch.edge_attr.shape[1] == data.edge_attr.shape[1]:
+		batch.edge_attr = torch.cat((batch.edge_attr[batch_keep, :], data.edge_attr[original_edge_ids, :]), dim=0)
+	else:
+		batch.edge_attr = torch.cat((batch.edge_attr[batch_keep, :], data.edge_attr[original_edge_ids, :-1]), dim=0)
+	batch.y = torch.cat((batch.y[batch_keep], data.y[original_edge_ids]), dim=0)
+	batch.timestamps = torch.cat((batch.timestamps[batch_keep], data.timestamps[original_edge_ids]), dim=0)
+	batch.e_id = torch.cat((batch.e_id[batch_keep], torch.tensor(original_edge_ids)), dim=0) # TODO: check what e_ids actually are!!
+	return batch
+
+def get_edge_id_mask(batch, inds, verbose=False):
+	original_edge_ids = inds[batch.input_id]
+	batch_indices = torch.isin(batch.edge_attr[:, -1], original_edge_ids)
+	if verbose: logging.debug(f"TIMES = {batch.timestamps[batch_indices].min()} -> {batch.timestamps[batch_indices].max()}")
+	batch.edge_attr = batch.edge_attr[:, :-1]
+	return batch_indices, batch
+
+def make_tensor(a):
+	if isinstance(a, torch.Tensor):
+		return a.clone()
+	else:
+		return torch.tensor(a)

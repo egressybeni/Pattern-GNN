@@ -46,7 +46,7 @@ def to_adj_edges_with_times(data):
         adj_edges_in[v] += [(i, u, t)]
     return adj_edges_in, adj_edges_out
 
-def ports(edge_index, adj_list):
+def ports(edge_index, adj_list, random=False):
     ports = torch.zeros(edge_index.shape[1], 1)
     ports_dict = {}
     for v, nbs in adj_list.items():
@@ -55,6 +55,7 @@ def ports(edge_index, adj_list):
         a = a[a[:, -1].argsort()]
         _, idx = np.unique(a[:,[0]],return_index=True,axis=0)
         nbs_unique = a[np.sort(idx)][:,0]
+        if random: np.random.shuffle(nbs_unique)
         for i, u in enumerate(nbs_unique):
             ports_dict[(u,v)] = i
     for i, e in enumerate(edge_index.T):
@@ -86,26 +87,32 @@ def ports_old(edge_index, adj_list):
         ports[i] = ports_dict[tuple(e.numpy())]
     return ports
 
-def add_reverse(data_):
+def add_reverse(data_, e_ids=True):
     data = data_.clone()
     num_edges = data.edge_index.shape[1]
     edge_type = torch.cat([torch.zeros((num_edges, 1)), torch.ones((num_edges, 1))], dim=0)
     edge_index = torch.cat([data.edge_index, data.edge_index.flipud()], dim=1)
-    edge_attr = torch.cat([data.edge_attr, data.edge_attr], dim=0)
+    if e_ids: 
+        max_id = data.edge_attr[:,-1].max() + 1
+        edge_ids = torch.cat([data.edge_attr[:,-1:], data.edge_attr[:,-1:] + max_id], dim=0)
+        edge_attr = torch.cat([data.edge_attr[:,:-1], data.edge_attr[:,:-1]], dim=0)
+        edge_attr = torch.cat([edge_attr, edge_ids], dim=1)
+    else:
+        edge_attr = torch.cat([data.edge_attr, data.edge_attr], dim=0)
     edge_attr = torch.cat([edge_attr, edge_type], dim=1)
     if data.readout == 'edge':
         y = torch.cat([data.y, data.y], dim=0)
         data.y = y
     data.edge_index = edge_index
     data.edge_attr = edge_attr
+    if data_.timestamps is not None:
+        data.timestamps = torch.cat([data_.timestamps, data_.timestamps], dim=0)
     return data
 
 def remove_reverse(data):
-    edge_attr = data.edge_attr[:,:-1]
-    edge_type = data.edge_attr[:,-1].long()
-    out_edges = torch.where(edge_type == 1)[0]
+    out_edges = data.edge_attr[:,-1].bool()
     data.edge_index[:, out_edges] = data.edge_index[:, out_edges].flipud()
-    data.edge_attr = edge_attr
+    data.edge_attr = data.edge_attr[:,:-1]
     return data
 
 class GraphData(Data):
@@ -129,12 +136,22 @@ class GraphData(Data):
         else:
             self.timestamps = None
 
-    def add_ports(self):
+    def add_ports(self, random=False):
         reverse_ports = True
         adj_list_in, adj_list_out = to_adj_nodes_with_times(self)
-        in_ports = ports(self.edge_index, adj_list_in)
-        out_ports = [ports(self.edge_index.flipud(), adj_list_out)] if reverse_ports else []
+        in_ports = ports(self.edge_index, adj_list_in, random=random)
+        out_ports = [ports(self.edge_index.flipud(), adj_list_out, random=random)] if reverse_ports else []
         self.edge_attr = torch.cat([self.edge_attr, in_ports] + out_ports, dim=1)
+        return self
+
+    def add_nodeIDs(self):
+        IDs = torch.randperm(self.num_nodes).view((-1,1))
+        self.x = torch.cat([self.x, IDs], dim=1)
+        return self
+    
+    def add_edgeIDs(self):
+        edge_ids = torch.arange(self.edge_attr.shape[0]).view((-1,1))
+        self.edge_attr = torch.cat((self.edge_attr, edge_ids), dim=1)
         return self
 
     def add_time_deltas(self):
@@ -257,18 +274,64 @@ class AddEgoIds(BaseTransform):
 
     def __repr__(self) -> str:
         return f'{self.__class__.__name__}()'
+    
+class AddEdgeEgoIds(BaseTransform):
+    r"""Add IDs to the incident centre nodes of the batch.
+    """
+    def __init__(self, batch_size=1):
+        self.batch_size = batch_size
+        pass
+
+    def __call__(self, data: Union[Data, HeteroData]):
+        x = data.x
+        device=x.device
+        ids = torch.zeros((x.shape[0], 1), device=device)
+        ids[:self.batch_size*2] = 1
+        data.x = torch.cat([x, ids], dim=1)
+        return data
+
+    def __repr__(self) -> str:
+        return f'{self.__class__.__name__}()'
 
 
-def normalize_data(tr_data, val_data, _te_data, fn_norm, device, node_name=None):
+class AddEdgeEgoIds2(BaseTransform):
+    r"""Add IDs to the centre edges of the batch.
+    """
+    def __init__(self, batch_size=1):
+        self.batch_size = batch_size
+        pass
+
+    def __call__(self, data: Union[Data, HeteroData]):
+        edge_attr = data.edge_attr
+        device=edge_attr.device
+        ids = torch.zeros((edge_attr.shape[0], 1), device=device)
+        ids[:self.batch_size] = 1
+        data.edge_attr = torch.cat([edge_attr, ids], dim=1)
+        return data
+
+    def __repr__(self) -> str:
+        return f'{self.__class__.__name__}()'
+    
+
+
+def normalize_data(tr_data, val_data, _te_data, fn_norm, device, node_name=None, e_ids=True):
     if isinstance(tr_data, Data):
         tr_data.x = fn_norm(tr_data.x, device)
         val_data.x = fn_norm(val_data.x, device)
         te_data = _te_data.detach().clone()
         te_data.x = fn_norm(_te_data.x, device)
         if tr_data.edge_attr is not None:
-            tr_data.edge_attr = fn_norm(tr_data.edge_attr, device)
-            val_data.edge_attr = fn_norm(val_data.edge_attr, device)
-            te_data.edge_attr = fn_norm(_te_data.edge_attr, device)
+            if e_ids:
+                tr_ids = tr_data.edge_attr[:, -1:]
+                tr_data.edge_attr = torch.cat((fn_norm(tr_data.edge_attr[:,:-1], device), tr_ids), dim=1)
+                val_ids = val_data.edge_attr[:, -1:]
+                val_data.edge_attr = torch.cat((fn_norm(val_data.edge_attr[:,:-1], device), val_ids), dim=1)
+                te_ids = te_data.edge_attr[:, -1:]
+                te_data.edge_attr = torch.cat((fn_norm(te_data.edge_attr[:,:-1], device), te_ids), dim=1)
+            else:
+                tr_data.edge_attr = fn_norm(tr_data.edge_attr, device)
+                val_data.edge_attr = fn_norm(val_data.edge_attr, device)
+                te_data.edge_attr = fn_norm(_te_data.edge_attr, device)
     elif isinstance(tr_data, HeteroData):
         tr_data[node_name].x = fn_norm(tr_data[node_name].x, device)
         val_data[node_name].x = fn_norm(val_data[node_name].x, device)
@@ -279,8 +342,12 @@ def normalize_data(tr_data, val_data, _te_data, fn_norm, device, node_name=None)
     return tr_data, val_data, te_data
 
 def get_batch_size(config, args, batch):
+    if batch is None:
+        return config.batch_size
     if args.readout == 'edge':
-        _batch_size = batch.edge_label.shape[0]
+        # _batch_size = batch.edge_label.shape[0]
+        _batch_size = batch.input_id.shape[0]
+        # _batch_size = batch.edge_label_index.shape[1]
     else: 
         _batch_size = batch[args.node_name].batch_size if config.multi_relational else batch.batch_size
     return _batch_size

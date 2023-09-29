@@ -19,4 +19,4 @@ done
 cd $root
 
 source /itet-stor/begressy/net_scratch/conda/bin/activate $conda
-python main.py --config_path $config --log_folder_name $out $txt --features raw --num_seeds $seeds --model_settings $model_settings --unique_name $name $adaptations $save_txt --noID --no_efeats
+python main.py --config_path $config --log_folder_name $out $txt --features raw --num_seeds $seeds --model_settings $model_settings --unique_name $name $adaptations $save_txt

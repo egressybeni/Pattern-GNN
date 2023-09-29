@@ -16,13 +16,13 @@ import os, psutil, sys, gc, time, pickle, logging, socket, json, optuna, torch
 from tqdm import tqdm
 import matplotlib.pyplot as plt
 
-from models.gnn_type2 import adapt_model, PNA, GINe, GATe, newMLPe #, MLP2
+from models.gnn_type2 import adapt_model, PNA, GINe, GATe, GCN, newMLPe #, MLP2
 from utils.evaluate import evaluate
 from utils.gcn_utils import (
-	generate_filtered_graph, z_normalize, l2_normalize, GraphData, AddEgoIds, 
+	generate_filtered_graph, z_normalize, l2_normalize, GraphData, AddEgoIds, AddEdgeEgoIds, AddEdgeEgoIds2,
 	normalize_data, add_reverse, remove_reverse, get_batch_size
 )
-from utils.util import open_csv, write_csv, set_seed
+from utils.util import open_csv, write_csv, set_seed, get_edge_id_mask, add_center_edges, make_tensor
 
 from torch.utils.tensorboard import SummaryWriter
 # from torch.profiler import profile, record_function, ProfilerActivity
@@ -35,6 +35,7 @@ def get_model(config, args, params, sample_data, n_classes, readout, residual=Fa
 	if not config.model == "type2_hetero_sage":
 		num_features = sample_data.x.shape[1]
 		edge_dim = sample_data.edge_attr.shape[1] if config.network_type == 'type1' else None # need if??
+		if readout == "edge": edge_dim = edge_dim - 1
 	# Load model if requested (e.g., for finetuning or continuing training)
 	if args.load_model:
 		logging.info(f"Loading model from {args.model_path}")
@@ -46,6 +47,7 @@ def get_model(config, args, params, sample_data, n_classes, readout, residual=Fa
 		return model
 	# Select the model
 	if config.model == "gin":
+		logging.debug("GNN model = GIN")
 		edge_features = True
 		edge_updates = True if config.edge_updates2 else False
 		config.generate_embedding = False # TODO: implement if needed
@@ -53,9 +55,10 @@ def get_model(config, args, params, sample_data, n_classes, readout, residual=Fa
 			num_features=num_features, num_gnn_layers=round(params['n_gnn_layers']), n_classes=n_classes, 
 			n_hidden=round(params['n_hidden']), embedding=config.generate_embedding, 
 			readout=readout,residual=residual, edge_features=edge_features, edge_updates=edge_updates, edge_dim=edge_dim, 
-			dropout=params['dropout'],reverse=config.reverse_mp, final_dropout=params['final_dropout']
+			dropout=params['dropout'], reverse=config.reverse_mp, final_dropout=params['final_dropout']
 			)
 	elif config.model == "gat":
+		logging.debug("GNN model = GAT")
 		edge_features = True
 		edge_updates = True if config.edge_updates2 else False
 		config.generate_embedding = False # TODO: implement if needed
@@ -63,8 +66,25 @@ def get_model(config, args, params, sample_data, n_classes, readout, residual=Fa
 			num_features=num_features, num_gnn_layers=round(params['n_gnn_layers']), n_classes=n_classes, 
 			n_hidden=round(params['n_hidden']), n_heads=round(params['n_heads']), embedding=config.generate_embedding, 
 			readout=readout,residual=residual, edge_features=edge_features, edge_updates=edge_updates, edge_dim=edge_dim, 
-			dropout=params['dropout'],reverse=config.reverse_mp, final_dropout=params['final_dropout']
+			dropout=params['dropout'], reverse=config.reverse_mp, final_dropout=params['final_dropout']
 			)
+	elif config.model == "gcn":
+		logging.debug("GNN model = GCN")
+		edge_features = True
+		edge_updates = True if config.edge_updates2 else False
+		config.generate_embedding = False # TODO: implement if needed
+		model = GCN(
+			num_features=num_features, num_gnn_layers=round(params['n_gnn_layers']), n_classes=n_classes, 
+			n_hidden=round(params['n_hidden']), embedding=config.generate_embedding, 
+			readout=readout,residual=residual, edge_features=edge_features, edge_updates=edge_updates, edge_dim=edge_dim, 
+			dropout=params['dropout'], reverse=config.reverse_mp, final_dropout=params['final_dropout']
+			)
+		# model = GINe(
+		# 	num_features=num_features, num_gnn_layers=round(params['n_gnn_layers']), n_classes=n_classes, 
+		# 	n_hidden=round(params['n_hidden']), embedding=config.generate_embedding, 
+		# 	readout=readout,residual=residual, edge_features=edge_features, edge_updates=edge_updates, edge_dim=edge_dim, 
+		# 	dropout=params['dropout'], reverse=config.reverse_mp, final_dropout=params['final_dropout'], aggr="mean"
+		# 	)
 	elif config.model == "mlp":
 		edge_features = True
 		edge_updates = True if config.edge_updates2 else False
@@ -73,7 +93,7 @@ def get_model(config, args, params, sample_data, n_classes, readout, residual=Fa
 			num_features=num_features, num_gnn_layers=round(params['n_gnn_layers']), n_classes=n_classes, 
 			n_hidden=round(params['n_hidden']), embedding=config.generate_embedding, 
 			readout=readout,residual=residual, edge_features=edge_features, edge_updates=edge_updates, edge_dim=edge_dim, 
-			dropout=params['dropout'],reverse=config.reverse_mp, final_dropout=params['final_dropout']
+			dropout=params['dropout'], reverse=config.reverse_mp, final_dropout=params['final_dropout']
 			)
 	elif config.model == "pna":
 		edge_features = True
@@ -110,11 +130,15 @@ def train_gnn_type2(
     :param params: Dictionary containing hyperparameter values
     :return: Returns torch model
     """
-	
+
+	if args.log == 'debug': te_inds = te_inds[:8192]
+
 	#set seed
 	if args.torch_seed is not None:
 		set_seed(args.torch_seed)
 		logging.info(f'Seed set to {args.torch_seed}')
+	else:
+		logging.info(f'Seed not set! {args.torch_seed}')
 		
 	device = args.device
 	imbalanced_sampling = False
@@ -152,7 +176,9 @@ def train_gnn_type2(
 		params['loss'] = _tr_data.loss_fn
 	else:
 		y = _tr_data.y
-		if len(y.unique()) > 2:
+		if config.simulator == 'dir':
+			params['loss'] = 'nll'
+		elif len(y.unique()) > 2:
 			params['loss'] = 'mse'
 		elif y.shape[1] > 1:
 			params['loss'] = 'bce_multi'
@@ -162,17 +188,16 @@ def train_gnn_type2(
 				if round(params['loss']) in loss_functions:
 					params['loss'] = loss_functions[round(params['loss'])]
 			except:
-				assert (
-					params['loss'] in loss_functions.values(), 
-					f"only {list(loss_functions.values())} losses are currently implemented, {params['loss']} is not implemented"
-					)
-				
+				assert params['loss'] in loss_functions.values(), f"only {list(loss_functions.values())} losses are currently implemented, {params['loss']} is not implemented"
+
 	# Get readout
 	if args.readout:
 		readout = args.readout
 	elif args.graph_simulator:
 		readout = _tr_data.readout
 	elif config.simulator == 'eth':
+		readout = 'node'
+	elif config.simulator == 'dir':
 		readout = 'node'
 	elif config.network_type == 'type1':
 		readout = 'edge'
@@ -234,18 +259,32 @@ def train_gnn_type2(
 	if y_classes > 1:
 		n_classes = y_classes
 	else:
-		n_classes = 1 if params['loss'] in ["bce", "mse"] else 2 #### TODO: automate this! and generalise code to more than 2 classes
-		##### DONE #####
+		if params['loss'] == 'nll':
+			n_classes = int(_tr_data.y.max()) + 1
+			logging.info(f"number of classes = {n_classes}")
+		else:
+			n_classes = 1 if params['loss'] in ["bce", "mse"] else 2 #### TODO: automate this! and generalise code to more than 2 classes
+	logging.info(f"Loss = {params['loss']}")
+	logging.info(f"Number of Classes = {n_classes}")
+	##### DONE #####
 		
-		# Initialize lists for some metrics we want to collect
+	# Initialize lists for some metrics we want to collect
 	tr_metric_list, val_metric_list, te_metric_list = [], [], []
 	tr_acc_list, val_acc_list, te_acc_list = [], [], []
 	epoch_save = 0
 	
 	## Iterate over validation folds. In each iteration, split train/valid data, create data loaders, TRAIN model, VALIDATE model and TEST model
-	for tr_inds, val_inds in val_folds[:1]:
+	tmp_val_folds = val_folds if config.simulator == 'dir' else val_folds[:1]
+	logging.debug(f"length of tmp_val_folds = {len(tmp_val_folds)}")
+	for tr_inds, val_inds in tmp_val_folds:
+		if args.log == 'debug': tr_inds, val_inds = tr_inds[:8192], val_inds[:8192]
+		if config.simulator == 'dir':
+			te_inds = ~(tr_inds + val_inds)
+			logging.info(f"te_inds = {te_inds.shape}, {te_inds.sum()}")
+
+		tr_inds_gpu, val_inds_gpu, te_inds_gpu = make_tensor(tr_inds).to(device), make_tensor(val_inds).to(device), make_tensor(te_inds).to(device)
 	
-	## Split train and val data and normalize
+		## Split train and val data and normalize
 		if not config.multi_relational:
 			if _val_data is not None:
 				logging.info(f"using tr_, val_, te_ data")
@@ -257,6 +296,8 @@ def train_gnn_type2(
 				val_data = GraphData(x=_val_data.x.detach().clone(), y=_val_data.y.detach().clone(),edge_index=_val_data.edge_index.detach().clone(),edge_attr=_val_data.edge_attr.detach().clone())
 			else:
 				tr_data, val_data = generate_filtered_graph(node_indices=[tr_inds, val_inds], data=_tr_data, relabel_nodes=True)
+			if config.simulator == 'dir':
+				logging.debug(f"tr_data: {tr_data}")
 			if not args.edges == 'none':
 				tr_data, val_data, te_data = normalize_data(tr_data, val_data, _te_data, fn_norm, device)
 		else:
@@ -290,8 +331,8 @@ def train_gnn_type2(
 				
 			num_workers = 0
 			
-			if args.y_from_file or config.simulator == "eth":
-				tr_inds, val_inds = val_folds[0]
+			if args.y_from_file or config.simulator in ["eth", "dir"]:
+				# tr_inds, val_inds = val_folds[0]
 				tr_input_nodes = tr_inds
 				val_input_nodes = val_inds
 				te_input_nodes = te_inds
@@ -310,13 +351,23 @@ def train_gnn_type2(
 				val_data = add_reverse(val_data)
 				te_data = add_reverse(te_data)
 				
+			transform = None
 			if args.ego:
-				transform = AddEgoIds()
-			else:
-				transform = None
+				if readout == "node":
+					transform = AddEgoIds()
+				elif readout == "edge":
+					_batch_size = get_batch_size(config, args, None)
+					transform = AddEdgeEgoIds(batch_size=_batch_size)
 				
 			logging.info(f"num_neighbors = {num_neighbors}")
 			if readout == "node" or readout == "graph":
+				# print(tr_input_nodes.shape, tr_input_nodes.sum())
+				# print(val_input_nodes.shape, val_input_nodes.sum())
+				# print(te_input_nodes.shape, te_input_nodes.sum())
+				logging.debug(f"val_input_nodes = {val_input_nodes[:6]}")
+				logging.info(f"NODE LOADER")
+				if config.simulator == 'dir':
+					logging.info(f"No tr/val and test overlap: {all(te_input_nodes == ~(tr_input_nodes+val_input_nodes))}")
 				train_loader = NeighborLoader(
 					tr_data, input_nodes=tr_input_nodes,num_neighbors=num_neighbors, batch_size=batch_size, shuffle=shuffle, 
 					sampler=sampler, num_workers=num_workers, transform=transform, disjoint=args.disjoint
@@ -330,17 +381,25 @@ def train_gnn_type2(
 					num_workers=num_workers, transform=transform, disjoint=args.disjoint
 					)
 			elif readout == "edge":
+				logging.info(f"LINK LOADER")
+				logging.debug(f"min/max train times = {tr_data.edge_attr[:,0].min()}/{tr_data.edge_attr[:,0].max()}, {tr_data.edge_attr[:,0].mean()}, {tr_data.edge_attr[:,0].var()}")
+				logging.debug(f"min/max train times = {tr_data.timestamps.min()}/{tr_data.timestamps.max()}")
+				logging.debug(f"min/max valid times = {val_data.edge_attr[val_inds,0].min()}/{val_data.edge_attr[val_inds,0].max()}, {val_data.edge_attr[:,0].mean()}, {val_data.edge_attr[:,0].var()}")
+				logging.debug(f"min/max valid times = {val_data.timestamps[val_inds].min()}/{val_data.timestamps[val_inds].max()}")
+				logging.debug(f"min/max test  times = {te_data.edge_attr[te_inds,0].min()}/{te_data.edge_attr[te_inds,0].max()}")
+				logging.debug(f"min/max test  times = {te_data.timestamps.min()}/{te_data.timestamps.max()}")
+				logging.debug(f"tr_data = {tr_data}")
 				train_loader = LinkNeighborLoader(
-					tr_data,num_neighbors=num_neighbors, # edge_label_index=tr_data.edge_index[:, tr_inds], edge_label=tr_data.y[tr_inds],
-					batch_size=batch_size, shuffle=shuffle, sampler=sampler#, disjoint=args.disjoint
+					tr_data,num_neighbors=num_neighbors, edge_label_index=tr_data.edge_index[:, tr_inds], edge_label=tr_data.y[tr_inds],
+					batch_size=batch_size, transform=transform, shuffle=shuffle, sampler=sampler#, disjoint=args.disjoint
 					)
 				val_loader = LinkNeighborLoader(
 					val_data,num_neighbors=num_neighbors, edge_label_index=val_data.edge_index[:, val_inds], edge_label=val_data.y[val_inds],
-					batch_size=batch_size, shuffle=False#, disjoint=args.disjoint
+					batch_size=batch_size, transform=transform, shuffle=False#, disjoint=args.disjoint
 					)
 				test_loader = LinkNeighborLoader(
 					te_data,num_neighbors=num_neighbors, edge_label_index=te_data.edge_index[:, te_inds], edge_label=te_data.y[te_inds],
-					batch_size=batch_size, shuffle=False#, disjoint=args.disjoint
+					batch_size=batch_size, transform=transform, shuffle=False#, disjoint=args.disjoint
 					)
 			else:
 				train_loader = DataLoader(tr_data, shuffle=shuffle, batch_size=batch_size, num_workers=num_workers)
@@ -352,9 +411,16 @@ def train_gnn_type2(
 		if not config.multi_relational:
 			logging.info(f"test_loader = {test_loader}")
 			sample_batch = next(iter(test_loader))
+			logging.debug(f"sample_batch = {sample_batch}")
 			if config.reverse_mp: sample_batch = remove_reverse(sample_batch)
-			_tr_data = sample_batch
+			# _tr_data = sample_batch
 			sample_data = sample_batch
+			logging.debug(f"sample_batch after remove_reverse = {sample_batch}")
+			# print(sample_batch.x.shape)
+			# print(sample_batch.x)
+			# print(sample_batch.edge_index.T)
+			# print(sample_batch.edge_attr)
+			# raise ValueError('A very specific bad thing happened.')
 			
 		residual = False if readout == 'edge' else True
 		if config.model == "rgcn":
@@ -401,6 +467,10 @@ def train_gnn_type2(
 			logging.info('using MSE loss')
 			loss_fn = torch.nn.MSELoss()
 			y_type = 'continuous'
+		elif params['loss'] == "nll":
+			logging.info('using NLL loss')
+			loss_fn = torch.nn.NLLLoss()
+			y_type = 'multiclass1'
 			
 		# Main training loop
 		epoch, n_waiting_rounds, best_val_loss, best_val_score = 0, 0, 1e9, 0
@@ -430,18 +500,44 @@ def train_gnn_type2(
 				for batch in tqdm(train_loader, disable=not args.tqdm):
 					try:
 						if config.reverse_mp: batch = remove_reverse(batch)
+						# if readout == "edge": batch = add_center_edges(tr_data, batch, tr_inds)
 						batch.to(device)
 						_batch_size = get_batch_size(config, args, batch)
-						node_inds = batch[node_name].node_indices[:_batch_size] if config.multi_relational else batch.node_indices[:_batch_size]
+						if readout == "edge": 
+							batch_indices, batch = get_edge_id_mask(batch, tr_inds_gpu, verbose=True)
+							# logging.debug(f"min timestamp = {batch.timestamps[batch_indices].min()}")
+							# logging.debug(f"batch size = {batch_indices.sum()}")
+						else: 
+							batch_indices = torch.arange(_batch_size)
+						# 	logging.debug(f"batch size = {_batch_size}")
+
+						# tr_input_nodes_list = torch.where(tr_input_nodes)[0]
+						# logging.debug(f"batch = {batch}")
+						# logging.debug(f"batch n_id = {batch.n_id[:10]}")
+						# logging.debug(f"batch n_id = {batch.n_id[:_batch_size].sort()[0][:10]}")
+						# logging.debug(f"batch n_id = {batch.n_id.sort()[0][:10]}")
+						# logging.debug(f"batch input_id = {batch.input_id[:10]}")
+						# logging.debug(f"batch input_id = {batch.input_id.sort()[0][:10]}")
+						# logging.debug(f"train_input_nodes[input_id] = {tr_input_nodes_list[batch.input_id.detach().cpu()][:10]}")
+						# logging.debug(f"train_input_nodes[input_id] = {tr_input_nodes_list[batch.input_id.detach().cpu()].sort()[0][:10]}")
+						# logging.debug(f"batch.y   = {batch.y.flatten()[:10]}")
+						# logging.debug(f"tr_data.y = {tr_data.y[batch.n_id.detach().cpu()].flatten()[:10]}")
+						# raise ValueError
+
+						if config.generate_embedding: node_inds = batch[node_name].node_indices[batch_indices] if config.multi_relational else batch.node_indices[batch_indices]
 						optimizer.zero_grad()
-						
+
 						out, _tr_batch_embed = model(batch)
-						out = out[:_batch_size]
-						if config.generate_embedding: _tr_embed[node_inds] = _tr_batch_embed[:_batch_size].detach().cpu()
-						tr_y = batch[node_name].y[:_batch_size] if config.model == "type2_hetero_sage" else batch.y[:_batch_size]
+						out = out[batch_indices]
+						if config.generate_embedding: _tr_embed[node_inds] = _tr_batch_embed[batch_indices].detach().cpu()
+						tr_y = batch[node_name].y[batch_indices] if config.model == "type2_hetero_sage" else batch.y[batch_indices]
 						if n_classes > 1:
-							tr_y = tr_y.view(-1).long() if params['loss'] == 'ce' else tr_y.float()
-							tr_loss = loss_fn(out, tr_y)
+							if params['loss'] == 'nll':
+								m = torch.nn.LogSoftmax(dim=1)
+								tr_loss = loss_fn(m(out).squeeze(), tr_y.long().squeeze()) 
+							else:
+								tr_y = tr_y.view(-1).long() if params['loss'] == 'ce' else tr_y.float()
+								tr_loss = loss_fn(out, tr_y)
 						else:
 							tr_y = tr_y.view(-1)
 							tr_loss = loss_fn(out.squeeze(), tr_y.float())
@@ -464,16 +560,28 @@ def train_gnn_type2(
 					_val_embed = torch.empty(n_rows_val_embed, 2 * n_hidden, device='cpu') if config.model in ['type2_hetero_sage', 'type2_gnn_mlp'] else torch.empty(n_rows_val_embed, n_hidden, device='cpu')
 					for batch in val_loader:
 						if config.reverse_mp: batch = remove_reverse(batch)
+						# if readout == "edge": batch = add_center_edges(val_data, batch, val_inds)
 						batch.to(device)
 						_batch_size = get_batch_size(config, args, batch)
-						node_inds = batch[node_name].node_indices[:_batch_size] if config.multi_relational else batch.node_indices[:_batch_size]
+						if readout == "edge": 
+							batch_indices, batch = get_edge_id_mask(batch, val_inds_gpu, verbose=True)
+							# logging.debug(f"batch size = {batch_indices.sum()}")
+						else: 
+							batch_indices = torch.arange(_batch_size)
+							# logging.debug(f"batch size = {_batch_size}")
+
+						if config.generate_embedding: node_inds = batch[node_name].node_indices[batch_indices] if config.multi_relational else batch.node_indices[batch_indices]
 						out, _val_batch_embed = model(batch)
-						out = out[:_batch_size]
-						if config.generate_embedding: _val_embed[node_inds] = _val_batch_embed[:_batch_size].detach().cpu()
-						val_y = batch[node_name].y[:_batch_size] if config.model == "type2_hetero_sage" else batch.y[:_batch_size]
+						out = out[batch_indices]
+						if config.generate_embedding: _val_embed[node_inds] = _val_batch_embed[batch_indices].detach().cpu()
+						val_y = batch[node_name].y[batch_indices] if config.model == "type2_hetero_sage" else batch.y[batch_indices]
 						if n_classes > 1:
-							val_y = val_y.view(-1).long() if params['loss'] == 'ce' else val_y.float()
-							val_loss = loss_fn(out, val_y)
+							if params['loss'] == 'nll':
+								m = torch.nn.LogSoftmax(dim=1)
+								val_loss = loss_fn(m(out).squeeze(), val_y.long().squeeze()) 
+							else:
+								val_y = val_y.view(-1).long() if params['loss'] == 'ce' else val_y.float()
+								val_loss = loss_fn(out, val_y)
 						else:
 							val_y = val_y.view(-1)
 							val_loss = loss_fn(out.squeeze(), val_y.float())
@@ -489,10 +597,10 @@ def train_gnn_type2(
 				writer.add_scalar('Loss/train', tr_loss_avg.item(), epoch)
 				writer.add_scalar('Loss/val', val_loss.item(), epoch)
 				
-			val_score = evaluate(val_loader, model, config, args, y_type=y_type, only_f1=True)
+			val_score = evaluate(val_loader, model, config, args, y_type=y_type, only_f1=True, inds=val_inds_gpu, verbose=True, data=val_data)
 			logging.debug(f"Val_score = {val_score}")
 			update = False
-			if val_score > best_val_score or epoch == 1:
+			if val_score >= best_val_score or epoch == 1:
 				update = True
 				# best_val_loss = val_loss
 				best_val_score = val_score
@@ -500,17 +608,20 @@ def train_gnn_type2(
 				epoch_save = epoch
 				if config.batching:
 					if args.save_preds:
-						tr_metrics, best_tr_preds = evaluate(train_loader, model, config, args, y_type=y_type, return_preds=True)
-						val_metrics, best_val_preds = evaluate(val_loader, model, config, args, y_type=y_type, return_preds=True)
-						te_metrics, best_te_preds = evaluate(test_loader, model, config, args, y_type=y_type, return_preds=True)
+						tr_metrics, best_tr_preds = evaluate(train_loader, model, config, args, y_type=y_type, return_preds=True, inds=tr_inds_gpu, data=tr_data)
+						val_metrics, best_val_preds = evaluate(val_loader, model, config, args, y_type=y_type, return_preds=True, inds=val_inds_gpu, data=val_data)
+						te_metrics, best_te_preds = evaluate(test_loader, model, config, args, y_type=y_type, return_preds=True, inds=te_inds_gpu, data=te_data)
 					else:
-						tr_metrics = evaluate(train_loader, model, config, args, y_type=y_type)
-						val_metrics = evaluate(val_loader, model, config, args, y_type=y_type)
-						te_metrics = evaluate(test_loader, model, config, args, y_type=y_type, log_time=True)
+						tr_metrics = evaluate(train_loader, model, config, args, y_type=y_type, inds=tr_inds_gpu, data=tr_data, verbose=True)
+						val_metrics = evaluate(val_loader, model, config, args, y_type=y_type, inds=val_inds_gpu, data=val_data, verbose=True)
+						te_metrics = evaluate(test_loader, model, config, args, y_type=y_type, log_time=True, inds=te_inds_gpu, data=te_data, verbose=True)
 				else:
-					tr_metrics = evaluate(tr_data, model, config, args, y_type=y_type)
-					val_metrics = evaluate(val_data, model, config, args, y_type=y_type)
-					te_metrics = evaluate(te_data, model, config, args, y_type=y_type)
+					tr_metrics = evaluate(tr_data, model, config, args, y_type=y_type, inds=tr_inds_gpu, data=tr_data)
+					val_metrics = evaluate(val_data, model, config, args, y_type=y_type, inds=val_inds_gpu, data=val_data)
+					te_metrics = evaluate(te_data, model, config, args, y_type=y_type, inds=te_inds_gpu, data=te_data)
+				logging.info(f"tr acc = {tr_metrics[0]}")
+				logging.info(f"val acc = {val_metrics[0]}")
+				logging.info(f"te acc = {te_metrics[0]}")
 				best_tr_metrics = tr_metrics
 				best_val_metrics = val_metrics
 				best_te_metrics = te_metrics
@@ -522,13 +633,13 @@ def train_gnn_type2(
 			elif tb_logging:
 				if config.batching:
 					k_eval = 50
-					tr_metrics = evaluate(train_loader, model, config, args, topk=k_eval, y_type=y_type, only_f1=args.only_f1)
-					val_metrics = val_score if args.only_f1 else evaluate(val_loader, model, config, args, y_type=y_type)
-					te_metrics = evaluate(test_loader, model, config, args, topk=k_eval, y_type=y_type, only_f1=args.only_f1)
+					tr_metrics = evaluate(train_loader, model, config, args, topk=k_eval, y_type=y_type, only_f1=args.only_f1, inds=tr_inds_gpu, data=tr_data)
+					val_metrics = val_score if args.only_f1 else evaluate(val_loader, model, config, args, y_type=y_type, inds=val_inds_gpu, data=val_data)
+					te_metrics = evaluate(test_loader, model, config, args, topk=k_eval, y_type=y_type, only_f1=args.only_f1, inds=te_inds_gpu, data=te_data)
 				else:
-					tr_metrics = evaluate(tr_data, model, config, args, y_type=y_type, only_f1=args.only_f1)
-					val_metrics = val_score if args.only_f1 else evaluate(val_loader, model, config, args, y_type=y_type)
-					te_metrics = evaluate(te_data, model, config, args, y_type=y_type, only_f1=args.only_f1)
+					tr_metrics = evaluate(tr_data, model, config, args, y_type=y_type, only_f1=args.only_f1, inds=tr_inds_gpu, data=tr_data)
+					val_metrics = val_score if args.only_f1 else evaluate(val_loader, model, config, args, y_type=y_type, inds=val_inds_gpu, data=val_data)
+					te_metrics = evaluate(te_data, model, config, args, y_type=y_type, only_f1=args.only_f1, inds=te_inds_gpu, data=te_data)
 			if tb_logging:
 				if args.only_f1:
 					if type(tr_metrics) is tuple:
@@ -555,11 +666,17 @@ def train_gnn_type2(
 						_te_embed = torch.empty(n_rows_te_embed, 2 * n_hidden, device='cpu') if config.model in ['type2_hetero_sage', 'type2_gnn_mlp'] else torch.empty(n_rows_te_embed, n_hidden, device='cpu')
 						for batch in test_loader:
 							if config.reverse_mp: batch = remove_reverse(batch)
+							# if readout == "edge": batch = add_center_edges(te_data, batch, te_inds)
 							batch.to(device)
 							_batch_size = get_batch_size(config, args, batch)
-							node_inds = batch[node_name].node_indices[:_batch_size] if config.multi_relational else batch.node_indices[:_batch_size]
+							if readout == "edge": 
+								batch_indices, batch = get_edge_id_mask(batch, te_inds_gpu, verbose=True)
+							else: 
+								batch_indices = torch.arange(_batch_size)
+							logging.debug(f"batch size = {batch_indices.sum()}")
+							if config.generate_embedding: node_inds = batch[node_name].node_indices[batch_indices] if config.multi_relational else batch.node_indices[batch_indices]
 							out, _te_batch_embed = model(batch)
-							_te_embed[node_inds] = _te_batch_embed[:_batch_size].detach().cpu()
+							_te_embed[node_inds] = _te_batch_embed[batch_indices].detach().cpu()
 					else:
 						_, _te_embed = model(te_data)
 						
@@ -656,15 +773,15 @@ def train_gnn_type2(
 	if tb_logging:
 		# logging.info(f"Closing Tensorboard.")
 		writer.close()
-		
+
 	# process = psutil.Process(os.getpid())
 	# logging.debug(f"mem use: {process.memory_info().rss / 1024 ** 2:.2f}")
-	model.cuda()
+	if torch.cuda.is_available(): model.cuda()
 	model.cpu()
 	del model
 	gc.collect()
 	del optimizer
-	torch.cuda.empty_cache()
+	if torch.cuda.is_available(): torch.cuda.empty_cache()
 	model = None
 	
 	if args.optuna:
@@ -817,23 +934,28 @@ def test_only_gnn_type2(_tr_data, _te_data, _val_data, val_folds, te_inds, confi
 				val_data = add_reverse(val_data)
 				te_data = add_reverse(te_data)
 				
+			transform = None
 			if args.ego:
-				transform = AddEgoIds()
-			else:
-				transform = None
+				if readout == "node":
+					transform = AddEgoIds()
+				elif readout == "edge":
+					_batch_size = get_batch_size(config, args, None)
+					transform = AddEdgeEgoIds(batch_size=_batch_size)
 				
 			logging.info(f"num_neighbors = {num_neighbors}")
 			if readout == "node" or readout == "graph":
+				logging.info(f"NODE LOADER")
 				train_loader = NeighborLoader(tr_data, input_nodes=tr_input_nodes,num_neighbors=num_neighbors, batch_size=batch_size, shuffle=shuffle, sampler=sampler, num_workers=num_workers, transform=transform,disjoint=args.disjoint)
 				val_loader = NeighborLoader(val_data, input_nodes=val_input_nodes,num_neighbors=num_neighbors, batch_size=batch_size, shuffle=False, num_workers=num_workers, transform=transform,disjoint=args.disjoint)
 				test_loader = NeighborLoader(te_data, input_nodes=te_input_nodes,num_neighbors=num_neighbors, batch_size=batch_size, shuffle=False, num_workers=num_workers, transform=transform,disjoint=args.disjoint)
 			elif readout == "edge":
+				logging.info(f"LINK LOADER")
 				train_loader = LinkNeighborLoader(
 					tr_data,num_neighbors=num_neighbors, # edge_label_index=tr_data.edge_index[:, tr_inds], edge_label=tr_data.y[tr_inds],
-					batch_size=batch_size, shuffle=shuffle, sampler=sampler
+					batch_size=batch_size, shuffle=shuffle, sampler=sampler, transform=transform
 					)
-				val_loader = LinkNeighborLoader(val_data,num_neighbors=num_neighbors, edge_label_index=val_data.edge_index[:, val_inds], edge_label=val_data.y[val_inds],batch_size=batch_size, shuffle=False)
-				test_loader = LinkNeighborLoader(te_data,num_neighbors=num_neighbors, edge_label_index=te_data.edge_index[:, te_inds], edge_label=te_data.y[te_inds],batch_size=batch_size, shuffle=False)
+				val_loader = LinkNeighborLoader(val_data,num_neighbors=num_neighbors, transform=transform, edge_label_index=val_data.edge_index[:, val_inds], edge_label=val_data.y[val_inds],batch_size=batch_size, shuffle=False)
+				test_loader = LinkNeighborLoader(te_data,num_neighbors=num_neighbors, transform=transform, edge_label_index=te_data.edge_index[:, te_inds], edge_label=te_data.y[te_inds],batch_size=batch_size, shuffle=False)
 			else:
 				train_loader = DataLoader(tr_data, shuffle=shuffle, batch_size=batch_size, num_workers=num_workers)
 				val_loader = DataLoader(val_data, shuffle=False, batch_size=batch_size, num_workers=num_workers)
@@ -863,13 +985,13 @@ def test_only_gnn_type2(_tr_data, _te_data, _val_data, val_folds, te_inds, confi
 		model.eval()
 		with torch.no_grad():
 			if args.save_preds:
-				tr_metrics, best_tr_preds = evaluate(train_loader, model, config, args, y_type=y_type, return_preds=True)
-				val_metrics, best_val_preds = evaluate(val_loader, model, config, args, y_type=y_type, return_preds=True)
-				te_metrics, best_te_preds = evaluate(test_loader, model, config, args, y_type=y_type, return_preds=True)
+				tr_metrics, best_tr_preds = evaluate(train_loader, model, config, args, y_type=y_type, return_preds=True, inds=tr_inds_gpu, data=tr_data)
+				val_metrics, best_val_preds = evaluate(val_loader, model, config, args, y_type=y_type, return_preds=True, inds=val_inds_gpu, data=val_data)
+				te_metrics, best_te_preds = evaluate(test_loader, model, config, args, y_type=y_type, return_preds=True, inds=te_inds_gpu, data=te_data)
 			else:
-				tr_metrics = evaluate(train_loader, model, config, args, y_type=y_type)
-				val_metrics = evaluate(val_loader, model, config, args, y_type=y_type)
-				te_metrics = evaluate(test_loader, model, config, args, y_type=y_type)
+				tr_metrics = evaluate(train_loader, model, config, args, y_type=y_type, inds=tr_inds_gpu, data=tr_data)
+				val_metrics = evaluate(val_loader, model, config, args, y_type=y_type, inds=val_inds_gpu, data=val_data)
+				te_metrics = evaluate(test_loader, model, config, args, y_type=y_type, inds=te_inds_gpu, data=te_data)
 
 		tr_metric_list.append([epoch_save, *tr_metrics[:5]])
 		val_metric_list.append(val_metrics[:5])
@@ -919,11 +1041,11 @@ def test_only_gnn_type2(_tr_data, _te_data, _val_data, val_folds, te_inds, confi
 		
 	# process = psutil.Process(os.getpid())
 	# logging.debug(f"mem use: {process.memory_info().rss / 1024 ** 2:.2f}")
-	model.cuda()
+	if torch.cuda.is_available(): model.cuda()
 	model.cpu()
 	del model
 	gc.collect()
-	torch.cuda.empty_cache()
+	if torch.cuda.is_available(): torch.cuda.empty_cache()
 	model = None
 	
 	return True
@@ -965,7 +1087,7 @@ def bayes_opt_tune_type2_gnn(_tr_data, _te_data, _val_data, val_folds, te_inds, 
 		
 	param_space = model_settings.bayes_opt_params
 	bayes_optimizer = BayesianOptimization(model_function, param_space, random_state=config.bayes_seed)
-	bayes_optimizer.maximize(n_iter=config.n_bayes_opt_iters,init_points=config.n_init_points_bayes_opt,acq='ei',alpha=1e-1)  # what about kappa decay?...
+	bayes_optimizer.maximize(n_iter=config.n_bayes_opt_iters, init_points=config.n_init_points_bayes_opt) #, acq='ei', alpha=1e-1)  # what about kappa decay?...
 	
 	if config.generate_embedding:
 		torch.save(meta_best_tr_embed, log_dir / "best_tr_embed.pt")

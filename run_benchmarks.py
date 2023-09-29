@@ -3,32 +3,38 @@ import subprocess
 import time
 
 ### Batch Job args ###
-conda_environment_path = 'oko'
+conda_environment_path = 'oko2'
 n_gpus = 1
-memory_gb = 60
+memory_gb = 40
 ######################
 
 explore = False
 
-DATA = 'SJ'
-NUM = '99' if explore else '06'
+DATA = 'AY'
+NUM = '81' if explore else '80'
 out_folder = f'../logs/logs_{DATA}_{NUM}'
-num_seeds = 1 if explore else 5
+if DATA in ['D1', 'D2', 'AY']:
+    num_seeds = 10 if explore else 10
+else:
+    num_seeds = 5 if explore else 5
 model_settings = f'./model_settings/model_settings_{DATA}.json'
 save_model = False
 
 ### Simulator ###
 # sim_labels      = 'binary_all'
-sim_labels      = 'binary_complex'
+# sim_labels      = 'binary_complex'
+sim_labels      = 'binary_cycles'
 sim_generator   = 'chordal'
-sim_num_nodes   = 8192
+sim_num_nodes   = 32768
 sim_avg_degree  = 6
 #################
 
-if DATA == 'ETH':
+if DATA in ['OA', 'AY', 'D1', 'D2', 'D3', 'D4', 'D5']:
+    data_txt = '--readout node'
+elif DATA == 'ETH':
     data_txt = '--readout node --simple_efeats'
 elif DATA == 'SIM':
-    data_txt = f'--readout node --graph_simulator --y_pretrain {sim_labels} --sim_num_nodes {sim_num_nodes} --sim_generator {sim_generator} --sim_avg_degree {sim_avg_degree}'
+    data_txt = f'--n_gnn_layers 10 --readout node --graph_simulator --y_pretrain {sim_labels} --sim_num_nodes {sim_num_nodes} --sim_generator {sim_generator} --sim_avg_degree {sim_avg_degree}'
 else:
     data_txt = '--readout edge'
 
@@ -41,13 +47,25 @@ runs = {
     'gin': [
         # '--reverse_mp --ports --ego --disjoint --edge_updates2 ',
         # '--reverse_mp --ports --ego --disjoint ',
-        # # # '--reverse_mp --ports --edge_updates2 ',
+        # '--reverse_mp --ports --ego',
+        # # # # '--reverse_mp --ports --edge_updates2 ',
+        '--reverse_mp --ports',
+        # # # '--reverse_mp --ports --random_ports',
+        # # # '--reverse_mp --ports --collapse_multi',
+        # # # '--collapse_multi',
+        '--reverse_mp ',
+        '',
+        # '--edge_updates2 ',
+        '--ports',
+        # '--ego --disjoint'
+    ],
+    'gcn': [
+        # '--reverse_mp --ports --ego --disjoint --edge_updates2 ',
+        # '--reverse_mp --ports --ego --disjoint ',
+        # '--reverse_mp --ports --ego',
         # '--reverse_mp --ports ',
         # '--reverse_mp ',
         # '',
-        # '--edge_updates2 ',
-        '--ports',
-        '--ego --disjoint'
     ],
     'pna': [
         # '--reverse_mp --ports --ego --disjoint --edge_updates2 ',
@@ -60,6 +78,7 @@ runs = {
     'gat': [
         # '--reverse_mp --ports --ego --disjoint --edge_updates2 ',
         # '--reverse_mp --ports --ego --disjoint ',
+        # '--reverse_mp --ports --ego',
         # '--reverse_mp --ports ',
         # '--reverse_mp ',
         # '',
@@ -86,23 +105,30 @@ if __name__ == "__main__":
                 # else:
                 config_run = config
                 # gpu_type = 'geforce_rtx_2080_ti|titan_rtx|geforce_rtx_3090' if 'ego' in adaptations else 'tesla_v100|geforce_rtx_2080_ti|titan_rtx'
-                gpu_type = 'geforce_rtx_3090|rtx_a6000' if 'reverse_mp' in adaptations else 'tesla_v100|geforce_rtx_2080_ti|titan_rtx'
-                # gpu_type = 'geforce_rtx_3090'
+                gpu_type = 'geforce_rtx_3090|rtx_a6000|a100' if 'reverse_mp' in adaptations else 'tesla_v100|geforce_rtx_2080_ti|titan_rtx'
+                gpu_type = 'geforce_rtx_3090'
                 # if explore:
                 #     gpu_type = 'geforce_rtx_3090|rtx_a6000'
-                gpu_type = 'tesla_v100|geforce_rtx_2080_ti|titan_rtx'
-                # gpu_type = 'geforce_rtx_3090|rtx_a6000'
+                # gpu_type = 'tesla_v100|geforce_rtx_2080_ti|titan_rtx'
+                # gpu_type = 'tesla_v100|geforce_rtx_2080_ti|titan_rtx|geforce_rtx_3090|rtx_a6000|a100'
+                # gpu_type = 'geforce_rtx_3090|rtx_a6000|a100|titan_rtx'
+                # gpu_type = 'rtx_a6000|a100'
                 # gpu_type = 'rtx_a6000'
+                # gpu_type = ''
+                # gpu_type = 'geforce_rtx_3090|rtx_a6000|a100'
+                # gpu_type = 'geforce_rtx_3090|rtx_a6000|a100'
+                # gpu_type = 'a100'
 
-                bash_script = """
-                sbatch --gres=gpu:1 --constraint='%s' --mem=%sG run.sh -a '%s' -b '%s' -c '%s' -d '%s' -e '%s' -f '%s' -g '%s' -h '%s' -i '%s' -j '%s'
-                """ % (gpu_type, memory_gb, os.getcwd(), conda_environment_path, config_run, out_folder, data_txt, num_seeds, model_settings, unique_name, adaptations, save_model_txt)
                 
                 # python_script = """
                 # python main.py --config_path %s --log_folder_name %s %s --features raw --num_seeds %s --model_settings %s --unique_name %s %s %s
                 # """% (config_run, out_folder, data_txt, num_seeds, model_settings, unique_name, adaptations, save_model_txt)
                 # print(python_script)
 
+                bash_script = """
+                sbatch --gres=gpu:1 --constraint='%s' --mem=%sG run.sh -a '%s' -b '%s' -c '%s' -d '%s' -e '%s' -f '%s' -g '%s' -h '%s' -i '%s' -j '%s'
+                """ % (gpu_type, memory_gb, os.getcwd(), conda_environment_path, config_run, out_folder, data_txt, num_seeds, model_settings, unique_name, adaptations, save_model_txt)
                 res = subprocess.run(bash_script, capture_output=True, shell=True)
                 print(res.stdout.decode())
+
                 time.sleep(1)

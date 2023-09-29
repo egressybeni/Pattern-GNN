@@ -1,4 +1,4 @@
-name: multi_gnn
+name: oko
 channels:
     - conda-forge
     - anaconda
